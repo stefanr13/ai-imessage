@@ -1,10 +1,14 @@
 import { stableHash } from "./transcript.mjs";
 
 export function normalizeText(value) {
-  return String(value || "")
+  let normalized = String(value || "")
     .trim()
     .replace(/\s+/g, " ")
     .toLowerCase();
+  if (normalized.startsWith("maybe:")) {
+    normalized = normalized.slice("maybe:".length).trim();
+  }
+  return normalized;
 }
 
 export function normalizePhone(value) {

@@ -5,20 +5,27 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 const helperPath = process.env.MESSAGES_AX_BIN || path.join(repoRoot, ".bin", "messages-ax");
+const helperTimeoutMs = Number(process.env.MESSAGES_AX_TIMEOUT_MS || 20000);
 
 function runHelper(args) {
-  return new Promise((resolve, reject) => {
-    execFile(helperPath, args, { cwd: repoRoot, maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
+  return new Promise((resolve) => {
+    execFile(helperPath, args, { cwd: repoRoot, maxBuffer: 16 * 1024 * 1024, timeout: helperTimeoutMs }, (error, stdout, stderr) => {
       if (error) {
-        error.message = `${error.message}\n${stderr}`;
-        reject(error);
+        resolve({
+          ok: false,
+          trusted: true,
+          message: `${error.message}\nhelper=${helperPath} ${args.join(" ")}\n${stderr}`.trim(),
+        });
         return;
       }
       try {
         resolve(JSON.parse(stdout));
       } catch (parseError) {
-        parseError.message = `${parseError.message}\nstdout=${stdout}\nstderr=${stderr}`;
-        reject(parseError);
+        resolve({
+          ok: false,
+          trusted: true,
+          message: `${parseError.message}\nstdout=${stdout}\nstderr=${stderr}`.trim(),
+        });
       }
     });
   });
@@ -30,7 +37,7 @@ function appleScriptString(value) {
 
 function runAppleScript(script) {
   return new Promise((resolve) => {
-    execFile("osascript", ["-e", script], { cwd: repoRoot, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
+    execFile("osascript", ["-e", script], { cwd: repoRoot, maxBuffer: 1024 * 1024, timeout: helperTimeoutMs }, (error, stdout, stderr) => {
       if (error) {
         resolve({
           ok: false,
