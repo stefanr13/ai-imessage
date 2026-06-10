@@ -7,7 +7,8 @@ Local-first iMessage assistant prototype using a custom macOS Accessibility brid
 - Swift helper controls Messages through narrow commands.
 - Node orchestrator handles retries, state, idempotency, and send gates.
 - Ollama runs `gemma4:12b` locally.
-- Daemon polls configured contacts and spends zero model tokens unless a new actionable message appears.
+- Draft monitor polls Messages sidebar rows and spends zero model tokens unless a new actionable message appears.
+- Local approval API exposes pending context/approval/manual-send work for the future phone app.
 - Logs are sanitized by default.
 
 ## Requirements
@@ -97,15 +98,15 @@ node src/run-contact-poc.mjs close-family dry-run
 
 This writes sanitized run records under `data/runs/`.
 
-## Daemon
+## Legacy Contact Daemon
 
-Read-only daemon:
+Older configured-contact dry-run path:
 
 ```bash
 DAEMON_MODE=dry-run node src/daemon.mjs
 ```
 
-Health:
+Legacy health:
 
 ```bash
 curl http://127.0.0.1:8790/health
@@ -121,7 +122,7 @@ This watches new Messages sidebar rows and drafts replies locally:
 SINCE_LOCAL=1:13pm ./scripts/start-draft-monitor.sh
 ```
 
-It watches visible Messages sidebar rows newer than the cutoff, opens candidate conversations, checks that the latest visible bubble is incoming, asks Gemma for a draft, then appends to:
+It watches visible Messages sidebar rows newer than the cutoff, opens candidate conversations, checks that the latest visible bubble is incoming, asks Gemma for a draft, asks Gemma again whether that draft is safe to auto-send, then appends to:
 
 ```text
 ~/Desktop/messages-ai-drafts.txt
@@ -132,9 +133,11 @@ Each entry includes:
 - `Conversation:`
 - recent visible transcript
 - `AI reply:`
-- reason and token usage
+- draft reason, risk decision, approval queue ID when applicable, and token usage
 
-Contacts with `autoSend: true` can send replies; every other conversation writes drafts only. The monitor first tries to read/open Messages through Accessibility without activating Messages, and only falls back to foreground UI control when macOS will not open a candidate row in the background.
+Contacts with `autoSend: true` can send replies only when the risk pass returns `auto_send` and every deterministic gate still passes. Plans, commitments, missing personal preference, money, contracts, health, credentials, conflict, and stale/unverified UI state are queued instead of sent. Every other conversation writes drafts only unless the contact has `approvalQueue: true`.
+
+The monitor first tries to read/open Messages through Accessibility without activating Messages, and only falls back to foreground UI control when macOS will not open a candidate row in the background.
 
 On startup it also creates both Desktop tracking files:
 
@@ -150,11 +153,19 @@ recipient messages, your observed reply, and what the AI would have replied.
 If Messages is running without a usable main window, the monitor attempts to
 re-open the Messages app before the next sidebar sweep.
 
+If the Messages sidebar shows a new preview but the visible transcript still
+exposes an already-processed latest bubble, the monitor writes an
+`unverified_ui_state` entry and creates an approval queue record instead of
+silently skipping it.
+
 For live sends, the draft monitor requires all of these:
 
 - contact `autoSend: true`
 - config `settings.allowSend: true`
 - environment `ALLOW_SEND=1`
+- Gemma risk classifier returns `auto_send`
+- deterministic risk veto does not match plans, commitments, money, private data, or other high-risk topics
+- the visible latest bubble fingerprint is unchanged immediately before send
 
 One-shot validation:
 
@@ -184,11 +195,47 @@ That script:
 - writes service logs to `data/draft-monitor.service.log`
 - restarts the monitor if it exits
 
+The monitor also writes a compact health snapshot for the local API:
+
+```text
+data/draft-monitor-health.json
+```
+
 Stop it with:
 
 ```bash
 ./scripts/stop-monitor-background.sh
 ```
+
+## Approval Queue API
+
+`server.mjs` exposes the local approval/control surface that the future phone
+app can call. It binds to `127.0.0.1` by default:
+
+```bash
+node server.mjs
+curl http://127.0.0.1:8787/health
+```
+
+Use a token before binding it to the LAN:
+
+```bash
+BRIDGE_TOKEN="$(openssl rand -hex 24)" HOST=0.0.0.0 node server.mjs
+```
+
+Endpoints:
+
+- `GET /health`: monitor heartbeat, approval counts, recent draft metadata.
+- `GET /approvals?status=open`: pending approval/context/UI-state items.
+- `GET /approvals/:id`: full approval request.
+- `POST /approvals/:id/approve`: approve exact text and send by default.
+- `POST /approvals/:id/reject`: reject a queued item.
+- `POST /approvals/:id/context`: attach user context without sending.
+- `POST /send`: create a manual-send approval; add `"confirm": true` to send exact text immediately.
+
+Approved sends still require `settings.allowSend: true`, `ALLOW_SEND=1`, and a
+configured contact slug. Unknown/sidebar-only conversations are never sent by
+the API until promoted into config.
 
 ## Shadow Compare Monitor
 
@@ -299,20 +346,17 @@ Phone numbers are masked in command output, but the normalized value is stored l
 
 Live sending is blocked unless all are true:
 
-- Command mode is `send`.
 - Config has `allowSend: true`.
 - Environment has `ALLOW_SEND=1`.
 - The latest visible message is new and incoming.
-- The deterministic rule matches.
-- Gemma confirms the same exact reply.
+- The configured contact has `autoSend: true`, or the exact reply was explicitly approved through the approval API.
+- Gemma drafts a sendable reply.
+- Gemma's risk classifier returns `auto_send` for automatic sends.
+- The deterministic risk veto does not match plans, commitments, money, legal/medical, credentials, conflict, private data, or missing user preference.
 - The bridge re-opens and re-reads the conversation immediately before sending.
 - The latest-message fingerprint has not changed.
 
-Example only after deliberately enabling config:
-
-```bash
-ALLOW_SEND=1 DAEMON_MODE=send node src/daemon.mjs
-```
+Manual API sends are exact-text only and require a configured contact slug.
 
 ## Token Controls
 

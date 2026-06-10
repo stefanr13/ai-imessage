@@ -118,6 +118,35 @@ CREATE TABLE IF NOT EXISTS drafts (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS approval_requests (
+  id TEXT PRIMARY KEY,
+  conversation_slug TEXT NOT NULL,
+  latest_hash TEXT,
+  status TEXT NOT NULL,
+  action TEXT NOT NULL,
+  proposed_reply TEXT,
+  reason TEXT,
+  risk_json TEXT NOT NULL DEFAULT '{}',
+  sidebar_json TEXT,
+  visible_json TEXT,
+  incoming_json TEXT,
+  model TEXT,
+  usage_json TEXT,
+  prompt_stats_json TEXT,
+  user_response_text TEXT,
+  send_result_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  decided_at TEXT,
+  sent_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_approval_requests_status_updated
+  ON approval_requests(status, updated_at);
+
+CREATE INDEX IF NOT EXISTS idx_approval_requests_conversation_updated
+  ON approval_requests(conversation_slug, updated_at);
+
 CREATE TABLE IF NOT EXISTS identity_evidence (
   id TEXT PRIMARY KEY,
   conversation_slug TEXT NOT NULL REFERENCES conversations(slug) ON DELETE CASCADE,
@@ -539,6 +568,306 @@ INSERT INTO drafts (
     { dbPath }
   );
   return { id };
+}
+
+export const APPROVAL_OPEN_STATUSES = [
+  "needs_approval",
+  "needs_context",
+  "manual_send_pending",
+  "unverified_ui_state",
+  "blocked_safety",
+  "send_failed",
+];
+
+function parseJsonField(value, fallback) {
+  if (value === null || value === undefined || value === "") return fallback;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
+function approvalRequestId({
+  id = null,
+  conversationSlug,
+  latestHash = null,
+  sidebar = null,
+  proposedReply = null,
+  action = null,
+  status = null,
+  reason = null,
+}) {
+  if (id) return id;
+  return stableHash({
+    type: "approval-request",
+    conversationSlug,
+    latestHash,
+    sidebarTitle: sidebar?.title || null,
+    sidebarPreview: sidebar?.preview || null,
+    sidebarTimeLabel: sidebar?.timeLabel || null,
+    proposedReply: proposedReply || null,
+    action: action || null,
+    status: status || null,
+    reason: typeof reason === "string" ? reason : reason?.reason || reason?.category || null,
+  });
+}
+
+function rowToApprovalRequest(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    conversationSlug: row.conversation_slug,
+    latestHash: row.latest_hash || null,
+    status: row.status,
+    action: row.action,
+    proposedReply: row.proposed_reply || null,
+    reason: row.reason || null,
+    risk: parseJsonField(row.risk_json, {}),
+    sidebar: parseJsonField(row.sidebar_json, null),
+    visible: parseJsonField(row.visible_json, null),
+    incoming: parseJsonField(row.incoming_json, []),
+    model: row.model || null,
+    usage: parseJsonField(row.usage_json, null),
+    promptStats: parseJsonField(row.prompt_stats_json, null),
+    userResponseText: row.user_response_text || null,
+    sendResult: parseJsonField(row.send_result_json, null),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    decidedAt: row.decided_at || null,
+    sentAt: row.sent_at || null,
+  };
+}
+
+export async function createApprovalRequest({
+  id = null,
+  conversationSlug,
+  latestHash = null,
+  sidebar = null,
+  visible = null,
+  incoming = [],
+  proposedReply = null,
+  reason = null,
+  risk = {},
+  status = "needs_approval",
+  action = "ask_approval",
+  model = null,
+  usage = null,
+  promptStats = null,
+  dbPath = DEFAULT_MEMORY_DB_PATH,
+}) {
+  await ensureMemoryDb(dbPath);
+  if (!conversationSlug) throw new Error("createApprovalRequest requires conversationSlug.");
+  const at = nowIso();
+  const requestId = approvalRequestId({
+    id,
+    conversationSlug,
+    latestHash,
+    sidebar,
+    proposedReply,
+    action,
+    status,
+    reason,
+  });
+  const reasonText = typeof reason === "string" ? reason : reason?.reason || reason?.category || null;
+  await runSql(
+    `
+INSERT INTO approval_requests (
+  id, conversation_slug, latest_hash, status, action, proposed_reply, reason, risk_json,
+  sidebar_json, visible_json, incoming_json, model, usage_json, prompt_stats_json,
+  created_at, updated_at
+) VALUES (
+  ${sqlValue(requestId)},
+  ${sqlValue(conversationSlug)},
+  ${sqlValue(latestHash || null)},
+  ${sqlValue(status)},
+  ${sqlValue(action)},
+  ${sqlValue(proposedReply || null)},
+  ${sqlValue(reasonText)},
+  ${sqlJson(risk || {})},
+  ${sqlJson(sidebar || null)},
+  ${sqlJson(visible || null)},
+  ${sqlJson(incoming || [])},
+  ${sqlValue(model || null)},
+  ${sqlJson(usage || null)},
+  ${sqlJson(promptStats || null)},
+  ${sqlValue(at)},
+  ${sqlValue(at)}
+)
+ON CONFLICT(id) DO UPDATE SET
+  latest_hash = COALESCE(excluded.latest_hash, approval_requests.latest_hash),
+  status = CASE
+    WHEN approval_requests.status IN ('sent', 'rejected') THEN approval_requests.status
+    ELSE excluded.status
+  END,
+  action = CASE
+    WHEN approval_requests.status IN ('sent', 'rejected') THEN approval_requests.action
+    ELSE excluded.action
+  END,
+  proposed_reply = COALESCE(excluded.proposed_reply, approval_requests.proposed_reply),
+  reason = COALESCE(excluded.reason, approval_requests.reason),
+  risk_json = excluded.risk_json,
+  sidebar_json = COALESCE(excluded.sidebar_json, approval_requests.sidebar_json),
+  visible_json = COALESCE(excluded.visible_json, approval_requests.visible_json),
+  incoming_json = excluded.incoming_json,
+  model = COALESCE(excluded.model, approval_requests.model),
+  usage_json = COALESCE(excluded.usage_json, approval_requests.usage_json),
+  prompt_stats_json = COALESCE(excluded.prompt_stats_json, approval_requests.prompt_stats_json),
+  updated_at = excluded.updated_at;
+`,
+    { dbPath }
+  );
+  return getApprovalRequest(requestId, { dbPath });
+}
+
+export async function getApprovalRequest(id, { dbPath = DEFAULT_MEMORY_DB_PATH } = {}) {
+  await ensureMemoryDb(dbPath);
+  const rows = await queryJson(
+    `
+SELECT *
+FROM approval_requests
+WHERE id = ${sqlValue(id)}
+LIMIT 1;
+`,
+    { dbPath }
+  );
+  return rowToApprovalRequest(rows[0] || null);
+}
+
+function approvalStatusWhere(status) {
+  if (!status || status === "open") {
+    return `status IN (${APPROVAL_OPEN_STATUSES.map(sqlValue).join(", ")})`;
+  }
+  if (Array.isArray(status)) {
+    return `status IN (${status.map(sqlValue).join(", ")})`;
+  }
+  return `status = ${sqlValue(status)}`;
+}
+
+export async function listApprovalRequests({ status = "open", limit = 20, dbPath = DEFAULT_MEMORY_DB_PATH } = {}) {
+  await ensureMemoryDb(dbPath);
+  const rows = await queryJson(
+    `
+SELECT *
+FROM approval_requests
+WHERE ${approvalStatusWhere(status)}
+ORDER BY updated_at DESC
+LIMIT ${sqlValue(Math.max(1, Math.min(Number(limit) || 20, 200)))};
+`,
+    { dbPath }
+  );
+  return rows.map(rowToApprovalRequest);
+}
+
+export async function countApprovalRequests({ status = "open", dbPath = DEFAULT_MEMORY_DB_PATH } = {}) {
+  await ensureMemoryDb(dbPath);
+  const rows = await queryJson(
+    `
+SELECT count(*) AS count
+FROM approval_requests
+WHERE ${approvalStatusWhere(status)};
+`,
+    { dbPath }
+  );
+  return Number(rows[0]?.count || 0);
+}
+
+export async function summarizeApprovalRequests({ dbPath = DEFAULT_MEMORY_DB_PATH } = {}) {
+  await ensureMemoryDb(dbPath);
+  const rows = await queryJson(
+    `
+SELECT status, count(*) AS count, max(updated_at) AS latest_at
+FROM approval_requests
+GROUP BY status
+ORDER BY latest_at DESC;
+`,
+    { dbPath }
+  );
+  return rows.map((row) => ({
+    status: row.status,
+    count: Number(row.count || 0),
+    latestAt: row.latest_at || null,
+  }));
+}
+
+export async function recordApprovalDecision({
+  id,
+  status,
+  action = null,
+  userResponseText = null,
+  dbPath = DEFAULT_MEMORY_DB_PATH,
+}) {
+  await ensureMemoryDb(dbPath);
+  if (!id) throw new Error("recordApprovalDecision requires id.");
+  if (!status) throw new Error("recordApprovalDecision requires status.");
+  const at = nowIso();
+  await runSql(
+    `
+UPDATE approval_requests
+SET
+  status = ${sqlValue(status)},
+  action = COALESCE(${sqlValue(action)}, action),
+  user_response_text = COALESCE(${sqlValue(userResponseText)}, user_response_text),
+  decided_at = ${sqlValue(at)},
+  updated_at = ${sqlValue(at)}
+WHERE id = ${sqlValue(id)};
+`,
+    { dbPath }
+  );
+  return getApprovalRequest(id, { dbPath });
+}
+
+export async function markApprovalSent({
+  id,
+  status = "sent",
+  sendResult = null,
+  dbPath = DEFAULT_MEMORY_DB_PATH,
+}) {
+  await ensureMemoryDb(dbPath);
+  if (!id) throw new Error("markApprovalSent requires id.");
+  const at = nowIso();
+  await runSql(
+    `
+UPDATE approval_requests
+SET
+  status = ${sqlValue(status)},
+  send_result_json = ${sqlJson(sendResult || null)},
+  sent_at = CASE WHEN ${sqlValue(status)} = 'sent' THEN ${sqlValue(at)} ELSE sent_at END,
+  updated_at = ${sqlValue(at)}
+WHERE id = ${sqlValue(id)};
+`,
+    { dbPath }
+  );
+  return getApprovalRequest(id, { dbPath });
+}
+
+export async function listRecentDrafts({ limit = 10, dbPath = DEFAULT_MEMORY_DB_PATH } = {}) {
+  await ensureMemoryDb(dbPath);
+  const rows = await queryJson(
+    `
+SELECT id, conversation_slug, latest_hash, action, reply_text, reason, send_ok, send_message,
+  model, usage_json, prompt_stats_json, sidebar_json, created_at
+FROM drafts
+ORDER BY created_at DESC
+LIMIT ${sqlValue(Math.max(1, Math.min(Number(limit) || 10, 100)))};
+`,
+    { dbPath }
+  );
+  return rows.map((row) => ({
+    id: row.id,
+    conversationSlug: row.conversation_slug,
+    latestHash: row.latest_hash || null,
+    action: row.action,
+    replyText: row.reply_text || null,
+    reason: row.reason || null,
+    sendOk: row.send_ok === null || row.send_ok === undefined ? null : Boolean(row.send_ok),
+    sendMessage: row.send_message || null,
+    model: row.model || null,
+    usage: parseJsonField(row.usage_json, null),
+    promptStats: parseJsonField(row.prompt_stats_json, null),
+    sidebar: parseJsonField(row.sidebar_json, null),
+    createdAt: row.created_at,
+  }));
 }
 
 export async function recordIdentityEvidence({

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { performance } from "node:perf_hooks";
 import { loadConfig } from "../src/config.mjs";
-import { draftReply } from "../src/decision.mjs";
+import { classifyReplyRisk, draftReply } from "../src/decision.mjs";
 import { getMemoryContext } from "../src/memory-store.mjs";
 import { messagesAx } from "../src/messages-ax.mjs";
 import { assertOllamaModelAvailable, DEFAULT_OLLAMA_URL, generateWithOllama, getOllamaVersion } from "../src/ollama-client.mjs";
@@ -60,6 +60,43 @@ const ping = await generateWithOllama({
   timeoutMs: Number(process.env.OLLAMA_TIMEOUT_MS || 120000),
 });
 const pingDurationSeconds = durationSeconds(pingStart);
+
+const riskStart = performance.now();
+const riskCheck = await classifyReplyRisk({
+  visible: {
+    conversationTitle: "Production Check",
+    messages: [
+      { direction: "outgoing", text: "How was your day" },
+      { direction: "incoming", text: "Do you want to go to the hockey game on Friday?" },
+    ],
+  },
+  contact: {
+    displayName: "Production Check",
+    autoSend: true,
+    draftPolicy: {
+      lowConfidenceAutoSendMaxChars: 45,
+    },
+  },
+  memoryContext: {
+    profile: {
+      confidence: "low",
+      askUserBefore: [],
+    },
+  },
+  draft: {
+    draft: {
+      shouldReply: true,
+      replyText: "Sure",
+      reason: "Simple acceptance.",
+    },
+  },
+});
+if (!riskCheck.risk.approvalRequired || !["needs_context", "ask_approval"].includes(riskCheck.risk.suggestedAction)) {
+  fail("Risk classifier did not require approval for a planning/commitment message.", {
+    risk: riskCheck.risk,
+  });
+}
+const riskDurationSeconds = durationSeconds(riskStart);
 
 let styleDraft = null;
 const styleCheckEntry =
@@ -126,6 +163,12 @@ console.log(
         durationSeconds: pingDurationSeconds,
         usage: ping.usage,
         text: ping.text,
+      },
+      riskCheck: {
+        durationSeconds: riskDurationSeconds,
+        risk: riskCheck.risk,
+        usage: riskCheck.usage,
+        promptStats: riskCheck.promptStats,
       },
       styleDraft,
     },

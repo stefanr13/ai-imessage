@@ -10,8 +10,11 @@ Mac bridge daemon (Node)
   -> Swift Accessibility helper controls Messages through narrow commands
   -> Message parser extracts structured visible text
   -> Cheap deterministic policy filters no-op and exact-rule cases
-  -> Ollama/Gemma 4 12B decides reply | ask_user | ignore from compact context
+  -> Ollama/Gemma 4 12B drafts from compact context
+  -> Ollama/Gemma 4 12B classifies auto-send risk
+  -> SQLite approval queue records needs_approval | needs_context | unverified_ui_state
   -> Send gate verifies target conversation and exact allowed reply
+  -> Local approval API exposes pending requests for a future phone app
   -> Local logs capture prompts, decisions, token counts, timings, and actions
   -> Phone app later handles approval, clarification, and manual overrides
 ```
@@ -24,11 +27,13 @@ The production path now has these constraints:
 - Per-contact state in `data/assistant-state.json`.
 - First-run baselining so old visible messages are recorded but not acted on.
 - Latest-message fingerprints so repeated polling does not reprocess the same bubble.
-- Model calls only when policy says the latest new message can potentially be auto-replied to.
+- Model calls only when policy says the latest new message can potentially need a draft or approval decision.
 - Sanitized run logs by default; raw message text is only written when `LOG_RAW_MESSAGES=1`.
 - Re-open and re-read immediately before any send, then abort if the latest-message fingerprint changed.
-- Live sends require all three gates: daemon/script mode `send`, config `allowSend: true`, and `ALLOW_SEND=1`.
-- Local health endpoint on `127.0.0.1:8790`.
+- Live sends require config `allowSend: true`, `ALLOW_SEND=1`, either contact `autoSend: true` or explicit API approval, and a final UI re-read.
+- Legacy contact-daemon health runs on `127.0.0.1:8790`; the approval API defaults to `127.0.0.1:8787`.
+- Draft monitor health is written to `data/draft-monitor-health.json`.
+- If the sidebar shows a newer preview that cannot be verified in the visible transcript, it is logged as `unverified_ui_state` instead of being discarded.
 
 ## Why This Shape
 
@@ -51,7 +56,9 @@ Gemma does not directly click, type, or send. The model only returns JSON:
 }
 ```
 
-The local policy layer decides whether that JSON is actionable. The bridge exposes narrow commands:
+The local policy layer decides whether model JSON is actionable. Drafting and
+risk classification are separate model calls; deterministic safety rules can
+veto the model's auto-send classification. The bridge exposes narrow commands:
 
 - `permission`
 - `open <conversation-name>`
@@ -95,6 +102,7 @@ The implemented local memory layer uses `data/memory.sqlite3` rather than `chat.
 - `style_examples`: extracted batches of incoming messages followed by the user's outgoing reply.
 - `conversation_profiles`: compact Gemma-built per-chat style profiles.
 - `drafts`: proposed replies, token usage, and send status.
+- `approval_requests`: queued approval/context/manual-send/UI-state items.
 - `identity_evidence`: observed names, UI titles, phone numbers, and emails from the Messages details/contact UI.
 
 Initial profile building can use a deeper visible transcript than live drafting. The history ingester scrolls the Messages UI through Accessibility, stores observed bubbles in SQLite, extracts incoming-batch-to-user-reply examples, and asks Gemma to synthesize a compact per-chat profile. The profile prompt is bounded with retry windows and a timeout, and includes deterministic local style stats so Gemma does not overgeneralize casing, punctuation, emoji use, or reply length.
@@ -121,15 +129,31 @@ No public iMessage API means no perfect API-grade listener. The best local desig
 
 This can be good enough for a dedicated Mac mini, but it needs soak testing before trusting broad auto-replies.
 
+## Approval Control Surface
+
+The production control path is:
+
+```text
+monitor -> approval_requests row -> local approval API -> phone app later -> exact approved text -> Mac sender
+```
+
+The API defaults to localhost. LAN binding must use `BRIDGE_TOKEN` unless
+explicitly overridden for testing. Approval endpoints can approve, reject, add
+context, or create a manual-send request. Sending approved text still requires
+global send gates and a configured contact slug; discovered fallback/sidebar
+contacts remain non-sending until promoted into config.
+
 ## Current POC
 
 1. Open the configured Messages conversation through Accessibility.
 2. Read visible messages into structured JSON.
 3. Baseline or fingerprint the latest visible message.
 4. Apply deterministic policy.
-5. Ask Gemma only when a deterministic auto-rule needs model confirmation.
-6. Send only if every send gate passes.
-7. Log model token counts, decisions, and sanitized message metadata.
+5. Ask Gemma for a draft when a new incoming candidate is visible.
+6. Ask Gemma whether the proposed draft is safe to auto-send.
+7. Queue ambiguous, high-risk, context-missing, or unverified UI cases.
+8. Send only if every send gate passes.
+9. Log model token counts, decisions, and sanitized message metadata.
 
 ## Draft Monitor MVP
 
@@ -141,6 +165,8 @@ This can be good enough for a dedicated Mac mini, but it needs soak testing befo
 - It opens candidate conversations and requires the latest visible bubble to be incoming.
 - It ingests the visible transcript into local conversation memory.
 - It asks Gemma for a draft reply using current context plus memory.
+- It asks Gemma whether the draft is low-consequence enough to auto-send.
+- It queues approval/context/UI-state items in SQLite for future mobile handling.
 - It appends the visible conversation, `AI reply:`, action, and token usage to `~/Desktop/messages-ai-drafts.txt`.
 
 This validates the two highest-risk assumptions before enabling any active behavior: new-message detection and reply quality.
