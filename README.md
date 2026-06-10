@@ -136,6 +136,20 @@ Each entry includes:
 
 Contacts with `autoSend: true` can send replies; every other conversation writes drafts only. The monitor first tries to read/open Messages through Accessibility without activating Messages, and only falls back to foreground UI control when macOS will not open a candidate row in the background.
 
+On startup it also creates both Desktop tracking files:
+
+```text
+~/Desktop/messages-ai-drafts.txt
+~/Desktop/messages-ai-shadow-replies.txt
+```
+
+The shadow file is written by the same production monitor when it observes your
+outgoing reply after an incoming batch. The AI draft is generated from the
+incoming messages before your reply is included, then the file records the
+recipient messages, your observed reply, and what the AI would have replied.
+If Messages is running without a usable main window, the monitor attempts to
+re-open the Messages app before the next sidebar sweep.
+
 For live sends, the draft monitor requires all of these:
 
 - contact `autoSend: true`
@@ -178,9 +192,9 @@ Stop it with:
 
 ## Shadow Compare Monitor
 
-To evaluate reply quality without showing the model your actual reply, run the
-shadow monitor. It drafts from the incoming batch before your outgoing reply and
-writes comparisons to `~/Desktop/messages-ai-shadow-replies.txt`:
+To evaluate reply quality without auto-send, run the shadow monitor by itself.
+It drafts from the incoming batch before your outgoing reply and writes
+comparisons to `~/Desktop/messages-ai-shadow-replies.txt`:
 
 ```bash
 SINCE_LOCAL=1:13pm ./scripts/start-shadow-monitor.sh

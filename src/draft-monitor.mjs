@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { execFile } from "node:child_process";
 import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -21,6 +22,8 @@ const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "
 const statePath = process.env.DRAFT_MONITOR_STATE || path.join(repoRoot, "data", "draft-monitor-state.json");
 const desktopPath =
   process.env.DRAFT_MONITOR_OUTPUT || path.join(os.homedir(), "Desktop", "messages-ai-drafts.txt");
+const shadowDesktopPath =
+  process.env.SHADOW_MONITOR_OUTPUT || path.join(os.homedir(), "Desktop", "messages-ai-shadow-replies.txt");
 const pollIntervalMs = Number(process.env.DRAFT_MONITOR_POLL_MS || 5000);
 const idleLogEveryCycles = Number(process.env.DRAFT_MONITOR_IDLE_LOG_EVERY_CYCLES || 60);
 
@@ -63,6 +66,12 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function runCommand(command, args) {
+  return new Promise((resolve) => {
+    execFile(command, args, { timeout: 8000 }, (error) => resolve({ ok: !error, error }));
+  });
+}
+
 async function loadState() {
   try {
     return JSON.parse(await readFile(statePath, "utf8"));
@@ -94,6 +103,26 @@ function formatConversation(visible, maxMessages = 12) {
     .join("\n");
 }
 
+async function appendStartupNotice({ since }) {
+  const at = new Date().toLocaleString();
+  for (const [filePath, label] of [
+    [desktopPath, "Draft/auto-reply monitor"],
+    [shadowDesktopPath, "Shadow training comparison monitor"],
+  ]) {
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await appendFile(
+      filePath,
+      [
+        "",
+        "============================================================",
+        `${label} started: ${at}`,
+        `Monitor since: ${since.toLocaleString()}`,
+        "",
+      ].join("\n")
+    );
+  }
+}
+
 async function appendDraft({ since, sidebar, visible, latestHash, draft, action = "drafted", sendResult = null }) {
   await mkdir(path.dirname(desktopPath), { recursive: true });
   const block = [
@@ -121,6 +150,89 @@ async function appendDraft({ since, sidebar, visible, latestHash, draft, action 
   await appendFile(desktopPath, block);
 }
 
+function compactMessages(messages) {
+  return (messages || [])
+    .map((message) => ({
+      direction: message.direction,
+      text: String(message.text || "").trim(),
+    }))
+    .filter((message) => message.text);
+}
+
+function findShadowComparisonTurn(visible) {
+  const messages = compactMessages(visible.messages);
+  if (!messages.length || messages.at(-1)?.direction !== "outgoing") return null;
+
+  let firstTrailingOutgoing = messages.length - 1;
+  while (firstTrailingOutgoing > 0 && messages[firstTrailingOutgoing - 1]?.direction === "outgoing") {
+    firstTrailingOutgoing -= 1;
+  }
+
+  const previousOutgoing = messages
+    .slice(0, firstTrailingOutgoing)
+    .findLastIndex((message) => message.direction === "outgoing");
+  const incoming = messages
+    .slice(previousOutgoing + 1, firstTrailingOutgoing)
+    .filter((message) => message.direction === "incoming" && message.text);
+  const actualReplies = messages
+    .slice(firstTrailingOutgoing)
+    .filter((message) => message.direction === "outgoing" && message.text);
+
+  if (!incoming.length || !actualReplies.length) return null;
+  const batchHash = stableHash({
+    title: visible.conversationTitle || null,
+    incoming: incoming.map((message) => message.text.toLowerCase()),
+  });
+  return {
+    batchHash,
+    eventHash: stableHash({
+      batchHash,
+      actualReplies: actualReplies.map((message) => message.text.toLowerCase()),
+      mode: "shadow-compared",
+    }),
+    incoming,
+    actualReplies,
+    draftVisible: {
+      ...visible,
+      messages: messages.slice(0, firstTrailingOutgoing),
+    },
+  };
+}
+
+function formatShadowLines(messages, fallbackSpeaker) {
+  return messages.map((message) => `${message.direction === "outgoing" ? "Me" : fallbackSpeaker}: ${message.text}`);
+}
+
+async function appendShadowComparison({ since, sidebar, visible, latestHash, turn, draft }) {
+  await mkdir(path.dirname(shadowDesktopPath), { recursive: true });
+  const speaker = visible.conversationTitle || sidebar.title || "Them";
+  const block = [
+    "",
+    "============================================================",
+    `Detected: ${new Date().toLocaleString()}`,
+    `Monitor since: ${since.toLocaleString()}`,
+    `Conversation: ${speaker}`,
+    `Sidebar time: ${sidebar.timeLabel}`,
+    `Action: shadow-compared`,
+    "",
+    "Recipient messages:",
+    ...formatShadowLines(turn.incoming, speaker),
+    "",
+    "My reply:",
+    ...formatShadowLines(turn.actualReplies, speaker),
+    "",
+    "AI would have replied:",
+    draft.draft.shouldReply ? draft.draft.replyText : "(no reply)",
+    `AI reason: ${draft.draft.reason}`,
+    `Model: ${draft.model || DEFAULT_MODEL}`,
+    `Tokens: prompt ${draft.usage.promptTokens}, output ${draft.usage.outputTokens}, total ${draft.usage.totalTokens}`,
+    `Latest fingerprint: ${latestHash}`,
+    `Batch fingerprint: ${turn.batchHash}`,
+    "",
+  ].join("\n");
+  await appendFile(shadowDesktopPath, block);
+}
+
 async function openAndReadSidebarItem(item, sidebar) {
   const backgroundOpen = await messagesAx.openSidebar(item.description, { background: true });
   if (backgroundOpen.ok) {
@@ -141,6 +253,16 @@ async function openAndReadSidebarItem(item, sidebar) {
     },
     visible,
   };
+}
+
+async function recoverMessagesWindow() {
+  await runCommand("open", ["-b", "com.apple.MobileSMS"]);
+  await sleep(1500);
+  try {
+    await messagesAx.clearSearch();
+  } catch {
+    // Best effort; the follow-up list call reports whether recovery worked.
+  }
 }
 
 async function verifyLatestUnchanged(latestHash) {
@@ -224,15 +346,10 @@ async function processSidebarItem({ config, item, since, state, now }) {
   const { opened, visible } = await openAndReadSidebarItem(item, sidebar);
   if (!opened.ok) return { processed: false, reason: `open-failed: ${opened.message}` };
   if (!visible?.ok) return { processed: false, reason: "read-failed" };
-  if (!isIncomingLatest(visible)) {
-    return { processed: false, reason: "latest-not-incoming" };
-  }
 
   const latestHash = messageFingerprint(latestVisibleMessage(visible));
   if (state.processed[latestHash]) return { processed: false, reason: "already-processed-latest" };
 
-  await getOllamaVersion();
-  await assertOllamaModelAvailable(DEFAULT_MODEL);
   const match = await resolveSidebarConversation(config, sidebar);
   const { slug, contact } = match;
   await ingestVisibleConversation({
@@ -242,6 +359,35 @@ async function processSidebarItem({ config, item, since, state, now }) {
     sidebarTitle: sidebar.title,
     source: "draft-monitor",
   });
+
+  if (!isIncomingLatest(visible)) {
+    const turn = findShadowComparisonTurn(visible);
+    if (!turn) return { processed: false, reason: "latest-not-incoming" };
+    if (state.processed[turn.eventHash]) return { processed: false, reason: "already-processed-shadow" };
+
+    await getOllamaVersion();
+    await assertOllamaModelAvailable(DEFAULT_MODEL);
+    const memoryContext = await getMemoryContext({ slug, contact });
+    const draft = await draftReply({ visible: turn.draftVisible, contact, memoryContext });
+    await appendShadowComparison({ since, sidebar, visible, latestHash, turn, draft });
+    await recordDraftMemory({ slug, latestHash, draft, action: "shadow-compared", sendResult: null, sidebar });
+
+    const stateRecord = {
+      at: new Date().toISOString(),
+      action: "shadow-compared",
+      sidebar,
+      latestHash,
+      output: shadowDesktopPath,
+      sent: false,
+      usage: draft.usage,
+    };
+    state.processed[turn.eventHash] = stateRecord;
+    state.processed[latestHash] = stateRecord;
+    return { processed: true, title: sidebar.title, action: "shadow-compared", latestHash, usage: draft.usage };
+  }
+
+  await getOllamaVersion();
+  await assertOllamaModelAvailable(DEFAULT_MODEL);
   const memoryContext = await getMemoryContext({ slug, contact });
   const draft = await draftReply({ visible, contact, memoryContext });
   let action = "drafted";
@@ -293,6 +439,10 @@ async function runCycle({ config, since, state }) {
     list = await messagesAx.listConversations({ activate: true });
   }
   if (!list.ok) {
+    await recoverMessagesWindow();
+    list = await messagesAx.listConversations({ activate: true });
+  }
+  if (!list.ok) {
     return [
       {
         processed: false,
@@ -323,6 +473,7 @@ async function main() {
       : await acquireLock(process.env.DRAFT_MONITOR_LOCK_DIR || path.join(repoRoot, "data", "draft-monitor.lock"));
   const state = await loadState();
   const config = await loadConfig();
+  await appendStartupNotice({ since });
   let stopping = false;
 
   async function shutdown(signal) {
@@ -337,6 +488,7 @@ async function main() {
 
   console.log(`Draft monitor since: ${since.toLocaleString()}`);
   console.log(`Writing drafts to: ${desktopPath}`);
+  console.log(`Writing shadow comparisons to: ${shadowDesktopPath}`);
   console.log("Mode: sends require contact autoSend=true, config allowSend=true, and ALLOW_SEND=1.");
 
   let idleCycles = 0;
