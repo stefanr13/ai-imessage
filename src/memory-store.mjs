@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { repoRoot } from "./config.mjs";
 import { normalizeComparableText, stableHash } from "./transcript.mjs";
@@ -39,6 +40,7 @@ async function queryJson(sql, options = {}) {
 }
 
 export async function ensureMemoryDb(dbPath = DEFAULT_MEMORY_DB_PATH) {
+  await mkdir(path.dirname(dbPath), { recursive: true });
   await runSql(
     `
 PRAGMA journal_mode=WAL;

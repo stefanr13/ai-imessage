@@ -15,4 +15,4 @@ if [[ -z "$NODE_BIN" ]]; then
   fi
 fi
 
-SINCE_LOCAL="${SINCE_LOCAL:-1:13pm}" "$NODE_BIN" src/draft-monitor.mjs "$@"
+SINCE_LOCAL="${SINCE_LOCAL:-12:00am}" "$NODE_BIN" src/shadow-monitor.mjs "$@"

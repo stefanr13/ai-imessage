@@ -53,20 +53,39 @@ export async function appendJsonl(filePath, value) {
 }
 
 export async function acquireLock(lockDir = path.join(repoRoot, "data", "assistant.lock")) {
-  try {
+  async function tryCreateLock() {
     await mkdir(lockDir, { recursive: false });
     await writeFile(path.join(lockDir, "pid"), `${process.pid}\n`);
+  }
+
+  try {
+    await tryCreateLock();
   } catch (error) {
-    if (error.code === "EEXIST") {
-      let existing = "unknown";
+    if (error.code !== "EEXIST") throw error;
+
+    let existing = "unknown";
+    try {
+      existing = (await readFile(path.join(lockDir, "pid"), "utf8")).trim();
+    } catch {
+      // Ignore stale or unreadable pid metadata; the stale lock cleanup below can still recover.
+    }
+
+    const pid = Number(existing);
+    const processStillRunning = Number.isInteger(pid) && pid > 0 && (() => {
       try {
-        existing = (await readFile(path.join(lockDir, "pid"), "utf8")).trim();
+        process.kill(pid, 0);
+        return true;
       } catch {
-        // Ignore stale or unreadable pid metadata; the operator can remove the lock.
+        return false;
       }
+    })();
+
+    if (processStillRunning) {
       throw new Error(`Assistant lock already exists at ${lockDir} (pid ${existing}).`);
     }
-    throw error;
+
+    await rm(lockDir, { recursive: true, force: true });
+    await tryCreateLock();
   }
 
   let released = false;

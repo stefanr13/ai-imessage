@@ -14,6 +14,7 @@ import {
 import { assertOllamaModelAvailable, getOllamaVersion } from "./ollama-client.mjs";
 import { messagesAx } from "./messages-ax.mjs";
 import { parseSidebarTimeToday, splitSidebarDescription } from "./sidebar.mjs";
+import { acquireLock } from "./state-store.mjs";
 import { latestVisibleMessage, messageFingerprint, stableHash } from "./transcript.mjs";
 
 const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
@@ -22,6 +23,21 @@ const desktopPath =
   process.env.DRAFT_MONITOR_OUTPUT || path.join(os.homedir(), "Desktop", "messages-ai-drafts.txt");
 const pollIntervalMs = Number(process.env.DRAFT_MONITOR_POLL_MS || 5000);
 const idleLogEveryCycles = Number(process.env.DRAFT_MONITOR_IDLE_LOG_EVERY_CYCLES || 60);
+
+function usage() {
+  console.log(`Usage: node src/draft-monitor.mjs [--once]
+
+Watches Messages sidebar rows newer than SINCE_LOCAL or SINCE_ISO and writes draft
+decisions to the Desktop log. Contacts only send when their local config explicitly
+enables autoSend and the deterministic send gates pass.
+
+Environment:
+  SINCE_LOCAL=1:13pm
+  SINCE_ISO=2026-06-10T19:13:00Z
+  DRAFT_MONITOR_OUTPUT=~/Desktop/messages-ai-drafts.txt
+  DRAFT_MONITOR_POLL_MS=5000
+`);
+}
 
 function todayAtLocalTime(hour, minute) {
   const now = new Date();
@@ -170,6 +186,16 @@ function autoSendStyleGate({ contact, memoryContext, draft }) {
   return { ok: true, reason: null };
 }
 
+function autoSendGlobalGate(config) {
+  if (config.settings.allowSend !== true) {
+    return { ok: false, reason: "config-allow-send-disabled" };
+  }
+  if (process.env.ALLOW_SEND !== "1") {
+    return { ok: false, reason: "missing-ALLOW_SEND=1" };
+  }
+  return { ok: true, reason: null };
+}
+
 async function resolveSidebarConversation(config, sidebar) {
   const configured = findSidebarContact(config, sidebar);
   if (configured) return configured;
@@ -220,19 +246,26 @@ async function processSidebarItem({ config, item, since, state, now }) {
   const draft = await draftReply({ visible, contact, memoryContext });
   let action = "drafted";
   let sendResult = null;
+  const globalGate = autoSendGlobalGate(config);
   const styleGate = autoSendStyleGate({ contact, memoryContext, draft });
+  const sendGate = globalGate.ok ? styleGate : globalGate;
   if (styleGate.ok) {
-    const verification = await verifyLatestUnchanged(latestHash);
-    if (verification.ok) {
-      const sendAttempt = await sendReplyForContact(contact, draft.draft.replyText);
-      sendResult = sendAttempt.result;
-      action = sendResult.ok ? (sendAttempt.mode === "direct" ? "direct-sent" : "sent") : "send-failed";
+    if (globalGate.ok) {
+      const verification = await verifyLatestUnchanged(latestHash);
+      if (verification.ok) {
+        const sendAttempt = await sendReplyForContact(contact, draft.draft.replyText);
+        sendResult = sendAttempt.result;
+        action = sendResult.ok ? (sendAttempt.mode === "direct" ? "direct-sent" : "sent") : "send-failed";
+      } else {
+        sendResult = { ok: false, message: verification.reason };
+        action = "send-blocked";
+      }
     } else {
-      sendResult = { ok: false, message: verification.reason };
+      sendResult = { ok: false, message: globalGate.reason };
       action = "send-blocked";
     }
   } else if (contact?.autoSend === true && draft.draft.shouldReply) {
-    sendResult = { ok: false, message: styleGate.reason };
+    sendResult = { ok: false, message: sendGate.reason };
     action = "send-blocked";
   }
   await appendDraft({ since, sidebar, visible, latestHash, draft, action, sendResult });
@@ -278,14 +311,33 @@ async function runCycle({ config, since, state }) {
 }
 
 async function main() {
+  if (process.argv.includes("--help") || process.argv.includes("-h")) {
+    usage();
+    return;
+  }
   const once = process.argv.includes("--once");
   const since = parseSince();
+  const releaseLock =
+    once || process.env.DRAFT_MONITOR_NO_LOCK === "1"
+      ? null
+      : await acquireLock(process.env.DRAFT_MONITOR_LOCK_DIR || path.join(repoRoot, "data", "draft-monitor.lock"));
   const state = await loadState();
   const config = await loadConfig();
+  let stopping = false;
+
+  async function shutdown(signal) {
+    if (stopping) return;
+    stopping = true;
+    console.log(JSON.stringify({ at: new Date().toISOString(), status: `stopping:${signal}` }));
+    if (releaseLock) await releaseLock();
+  }
+
+  process.on("SIGINT", () => shutdown("SIGINT").then(() => process.exit(0)));
+  process.on("SIGTERM", () => shutdown("SIGTERM").then(() => process.exit(0)));
 
   console.log(`Draft monitor since: ${since.toLocaleString()}`);
   console.log(`Writing drafts to: ${desktopPath}`);
-  console.log("Mode: configured auto-send contacts can send; all other conversations write drafts only.");
+  console.log("Mode: sends require contact autoSend=true, config allowSend=true, and ALLOW_SEND=1.");
 
   let idleCycles = 0;
   while (true) {
@@ -304,9 +356,10 @@ async function main() {
         console.log(JSON.stringify({ at: new Date().toISOString(), processed: 0, idleCycles }, null, 2));
       }
     }
-    if (once) break;
+    if (once || stopping) break;
     await sleep(pollIntervalMs);
   }
+  if (releaseLock) await releaseLock();
 }
 
 main().catch((error) => {

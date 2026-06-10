@@ -52,6 +52,35 @@ The example contact slug is `close-family`. If Messages exposes a different sear
 }
 ```
 
+If Messages shows phone numbers instead of contact names, keep auto-send off and add
+the phone-number title as a local alias. First inspect the visible sidebar with
+numbers masked:
+
+```bash
+node scripts/list-sidebar.mjs --activate
+```
+
+Then promote the row into `config/contacts.local.json`:
+
+```bash
+node scripts/promote-sidebar-contact.mjs close-family \
+  --display-name "Close Family" \
+  --title "+1 555 123 4567" \
+  --phone "+1 555 123 4567"
+```
+
+This updates only the gitignored local config, stores the normalized phone under
+`identity.phoneNumbers`, and leaves `autoSend: false`.
+
+Install a normal user-local Node runtime if the Mac does not have one:
+
+```bash
+./scripts/setup-node.sh
+```
+
+That installs the pinned Node build under `~/.local/opt` and links `node`, `npm`,
+and `npx` into `~/.local/bin`.
+
 ## Safe Tests
 
 Mock Gemma test, no Messages access:
@@ -107,6 +136,12 @@ Each entry includes:
 
 Contacts with `autoSend: true` can send replies; every other conversation writes drafts only. The monitor first tries to read/open Messages through Accessibility without activating Messages, and only falls back to foreground UI control when macOS will not open a candidate row in the background.
 
+For live sends, the draft monitor requires all of these:
+
+- contact `autoSend: true`
+- config `settings.allowSend: true`
+- environment `ALLOW_SEND=1`
+
 One-shot validation:
 
 ```bash
@@ -118,6 +153,47 @@ Use a future cutoff for a no-action startup test:
 ```bash
 SINCE_LOCAL=11:59pm node src/draft-monitor.mjs --once
 ```
+
+Production background start with a supervised `screen` session:
+
+```bash
+./scripts/start-monitor-background.sh
+```
+
+That script:
+
+- rebuilds the Accessibility bridge
+- checks Accessibility trust
+- checks Ollama and `gemma4:12b`
+- runs a configured style/policy draft check when examples are available
+- starts `src/draft-monitor.mjs` under `screen`
+- writes service logs to `data/draft-monitor.service.log`
+- restarts the monitor if it exits
+
+Stop it with:
+
+```bash
+./scripts/stop-monitor-background.sh
+```
+
+## Shadow Compare Monitor
+
+To evaluate reply quality without showing the model your actual reply, run the
+shadow monitor. It drafts from the incoming batch before your outgoing reply and
+writes comparisons to `~/Desktop/messages-ai-shadow-replies.txt`:
+
+```bash
+SINCE_LOCAL=1:13pm ./scripts/start-shadow-monitor.sh
+```
+
+It logs:
+
+- recipient messages
+- your reply, once observed
+- what the AI would have replied
+
+This monitor never sends messages. Use it alongside manual texting or before
+enabling broader auto-reply behavior.
 
 ## Conversation Memory
 
