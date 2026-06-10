@@ -1,0 +1,7 @@
+data/
+.bin/
+.env
+*.log
+config/contacts.local.json
+launchd/*.plist
+!launchd/*.plist.example

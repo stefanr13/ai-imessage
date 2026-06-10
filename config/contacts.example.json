@@ -1,0 +1,93 @@
+{
+  "settings": {
+    "pollIntervalMs": 5000,
+    "baselineExistingMessages": true,
+    "requireModelConfirmation": true,
+    "allowSend": false,
+    "logRawMessages": false,
+    "healthHost": "127.0.0.1",
+    "healthPort": 8790,
+    "maxOpenRetries": 3,
+    "retryDelayMs": 750
+  },
+  "contacts": {
+    "close-family": {
+      "displayName": "Close Family",
+      "searchName": "Close Family",
+      "resultName": "Maybe: Close Family",
+      "conversationTitle": "Close Family",
+      "titleAliases": ["Close Family", "Maybe: Close Family"],
+      "enabled": true,
+      "autoSend": false,
+      "relationship": "close family",
+      "contextFacts": {
+        "child_name": "Describe important family context here so the model does not misuse names.",
+        "favorite_food": "Describe recurring food or family references here."
+      },
+      "styleProfile": "Very casual, concise, human texting. Short does not mean incomplete: when this person sends multiple bubbles, answer the main points, especially offers, questions, plans, or updates. Avoid assistant-like apologies, polished recaps, forced laughter, em dashes, and over-explaining.",
+      "draftPolicy": {
+        "maxAutoSendChars": 120,
+        "lowConfidenceAutoSendMaxChars": 45,
+        "maxPositiveExamples": 10,
+        "maxNegativeExamples": 10,
+        "forbidDashCharacters": true,
+        "forbiddenPhrases": [
+          "as an ai",
+          "i'm sorry",
+          "sounds like",
+          "the audacity",
+          "hahaha"
+        ],
+        "coverageRules": [
+          {
+            "name": "offer",
+            "incomingPattern": "save me|enough for you|want some|left some",
+            "replyPattern": "save me|leave me|some for me|yes",
+            "reason": "offer was not addressed"
+          }
+        ],
+        "excludedStyleReplies": [
+          "Example bad reply that should never be learned or reused."
+        ]
+      },
+      "styleExamples": {
+        "positive": [
+          {
+            "incoming": ["We took a nap", "There is food left for you"],
+            "reply": "Everyone needed that nap. Save me some",
+            "why": "Covers both the update and offer without forced laughter."
+          },
+          {
+            "incoming": ["How is work"],
+            "reply": "More people just pulled up at the door",
+            "why": "Specific real-life answer. Casual and not polished."
+          }
+        ],
+        "negative": [
+          {
+            "incoming": ["We took a nap", "There is food left for you"],
+            "badReply": "Hahaha sounds like everyone had quite the day!",
+            "whyBad": "Forced laughter, generic, and assistant-like."
+          },
+          {
+            "incoming": ["That is definitely ChatGPT"],
+            "badReply": "Haha fair enough, I will try to sound more like myself next time.",
+            "whyBad": "Breaks the illusion and sounds assistant-written."
+          }
+        ]
+      },
+      "identity": {
+        "canonicalName": "Close Family",
+        "phoneNumbers": [],
+        "emails": [],
+        "imessageHandles": []
+      },
+      "directSend": {
+        "enabled": false,
+        "serviceType": "iMessage",
+        "handle": ""
+      },
+      "autoRules": []
+    }
+  }
+}

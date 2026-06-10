@@ -1,0 +1,247 @@
+# Local Messages Assistant
+
+Local-first iMessage assistant prototype using a custom macOS Accessibility bridge plus local Ollama/Gemma decisions. Codex is only used to build and test the system, not as the always-on runtime.
+
+## Current Shape
+
+- Swift helper controls Messages through narrow commands.
+- Node orchestrator handles retries, state, idempotency, and send gates.
+- Ollama runs `gemma4:12b` locally.
+- Daemon polls configured contacts and spends zero model tokens unless a new actionable message appears.
+- Logs are sanitized by default.
+
+## Requirements
+
+- macOS with Messages signed in.
+- Ollama 0.30.7 or newer with `gemma4:12b`.
+- Node 18+.
+- Xcode command line tools.
+- Accessibility permission granted for the terminal/Codex process running `.bin/messages-ax`.
+
+## Build
+
+```bash
+./scripts/build-bridge.sh
+```
+
+Check permission:
+
+```bash
+./.bin/messages-ax permission
+```
+
+## Configure Contacts
+
+Copy the example config to a local, gitignored config before adding real contacts:
+
+```bash
+cp config/contacts.example.json config/contacts.local.json
+```
+
+The app prefers `config/contacts.local.json` when present and falls back to `config/contacts.example.json`.
+
+The example contact slug is `close-family`. If Messages exposes a different search/result label, keep the slug stable, but set these fields to the exact labels Messages shows:
+
+```json
+{
+  "displayName": "Close Family",
+  "searchName": "Exact search text to type",
+  "resultName": "Exact conversation result label to click",
+  "conversationTitle": "Exact title shown after opening",
+  "titleAliases": ["Any alternate visible title"]
+}
+```
+
+## Safe Tests
+
+Mock Gemma test, no Messages access:
+
+```bash
+node scripts/test-decision.mjs close-family
+```
+
+Read-only real Messages dry-run:
+
+```bash
+node src/run-contact-poc.mjs close-family dry-run
+```
+
+This writes sanitized run records under `data/runs/`.
+
+## Daemon
+
+Read-only daemon:
+
+```bash
+DAEMON_MODE=dry-run node src/daemon.mjs
+```
+
+Health:
+
+```bash
+curl http://127.0.0.1:8790/health
+```
+
+A launchd example is in `launchd/com.local.messages-assistant.plist.example`.
+
+## Draft Monitor MVP
+
+This watches new Messages sidebar rows and drafts replies locally:
+
+```bash
+SINCE_LOCAL=1:13pm ./scripts/start-draft-monitor.sh
+```
+
+It watches visible Messages sidebar rows newer than the cutoff, opens candidate conversations, checks that the latest visible bubble is incoming, asks Gemma for a draft, then appends to:
+
+```text
+~/Desktop/messages-ai-drafts.txt
+```
+
+Each entry includes:
+
+- `Conversation:`
+- recent visible transcript
+- `AI reply:`
+- reason and token usage
+
+Contacts with `autoSend: true` can send replies; every other conversation writes drafts only. The monitor first tries to read/open Messages through Accessibility without activating Messages, and only falls back to foreground UI control when macOS will not open a candidate row in the background.
+
+One-shot validation:
+
+```bash
+SINCE_LOCAL=1:13pm node src/draft-monitor.mjs --once
+```
+
+Use a future cutoff for a no-action startup test:
+
+```bash
+SINCE_LOCAL=11:59pm node src/draft-monitor.mjs --once
+```
+
+## Conversation Memory
+
+The assistant keeps a local SQLite memory DB at:
+
+```text
+data/memory.sqlite3
+```
+
+This DB is local and gitignored. It stores visible UI transcripts, extracted style examples, compact per-conversation profiles, and draft/send records. It does not read `chat.db`.
+
+Build or refresh a profile for a configured contact:
+
+```bash
+node scripts/profile-conversation.mjs close-family
+```
+
+That command:
+
+- opens the configured conversation, preferring background Accessibility operations
+- ingests the currently visible Messages transcript
+- extracts examples of `incoming batch -> your outgoing reply`
+- asks Gemma to build a compact per-conversation profile
+- stores the profile and examples in `data/memory.sqlite3`
+
+Skip the Gemma profile refresh and only ingest visible messages:
+
+```bash
+node scripts/profile-conversation.mjs close-family --no-refresh
+```
+
+For a deeper initial profile, scroll through the Messages transcript and ingest more history:
+
+```bash
+node scripts/ingest-history.mjs close-family --limit 100 --max-pages 35
+```
+
+That command opens the configured conversation, walks older visible pages through Accessibility, stores up to the requested message limit in SQLite, extracts reply examples, and asks Gemma to synthesize the compact profile from that larger local evidence set. It still does not read `chat.db`.
+
+The profile builder passes Gemma bounded evidence, not the entire raw database:
+
+- up to 100 recent usable messages by default
+- up to 20 extracted incoming-to-user-reply examples by default
+- configured positive and negative style guardrails
+- local writing stats such as reply length, capitalization, punctuation, and emoji rates
+
+If Gemma returns malformed JSON or takes too long, the builder retries with smaller evidence windows and has a profile timeout. Override with environment variables such as `PROFILE_COMPACT_MESSAGES`, `PROFILE_COMPACT_EXAMPLES`, `PROFILE_NUM_CTX`, `PROFILE_NUM_PREDICT`, and `PROFILE_OLLAMA_TIMEOUT_MS`.
+
+Future live drafts receive:
+
+- the current incoming batch since your last outgoing message
+- the recent visible transcript
+- the compact per-conversation profile
+- a few examples of how you have replied in that specific conversation
+
+Thin evidence is confidence-capped locally, so a small or test-heavy transcript cannot mark itself as high-confidence just because the model says so.
+
+The example contact has a stricter style policy in config:
+
+- no dash characters in auto-send replies
+- no known AI-sounding phrases from failed tests
+- no excluded assistant-generated replies as style examples
+- curated `writeLikeThis` and `doNotWriteLikeThis` contrastive examples
+- max auto-send length
+- lower max auto-send length while the profile confidence is low
+
+If Gemma violates the style policy, it retries with the exact violation. If it still cannot produce a compliant reply, the monitor writes the draft decision to the Desktop file and does not send.
+
+The contrastive examples are deliberately separated:
+
+- Positive examples: short, approved patterns the model may imitate.
+- Negative examples: bad assistant-style replies plus `whyBad` labels. These are explicitly marked as forbidden in the prompt.
+
+For each contact, tune these in `config/contacts.example.json` under `styleExamples`. The default limits are up to 10 positive and 10 negative examples per live prompt.
+
+## Identity Extraction
+
+Conversation matching starts with configured aliases, then uses local identity evidence. To extract identity evidence from the Messages details/contact UI:
+
+```bash
+node scripts/extract-identity.mjs close-family
+```
+
+That command opens the configured contact, presses the Messages conversation header/details control, extracts visible candidate names, phone numbers, emails, and UI titles, and stores them in `identity_evidence` inside `data/memory.sqlite3`.
+
+Phone numbers are masked in command output, but the normalized value is stored locally so a future sidebar row shown as a phone number can still map back to the configured contact slug. This does not enable direct AppleScript sends by itself; direct sending still requires an explicitly configured `directSend.handle`.
+
+## Send Gates
+
+Live sending is blocked unless all are true:
+
+- Command mode is `send`.
+- Config has `allowSend: true`.
+- Environment has `ALLOW_SEND=1`.
+- The latest visible message is new and incoming.
+- The deterministic rule matches.
+- Gemma confirms the same exact reply.
+- The bridge re-opens and re-reads the conversation immediately before sending.
+- The latest-message fingerprint has not changed.
+
+Example only after deliberately enabling config:
+
+```bash
+ALLOW_SEND=1 DAEMON_MODE=send node src/daemon.mjs
+```
+
+## Token Controls
+
+Useful environment variables:
+
+```bash
+GEMMA_MODEL=gemma4:12b
+MAX_VISIBLE_MESSAGES=12
+MAX_MESSAGE_CHARS=1200
+POLL_INTERVAL_MS=5000
+LOG_RAW_MESSAGES=0
+```
+
+The mock decision reports local model token usage in its output.
+
+## What Still Needs Soak Testing
+
+- Leave `src/draft-monitor.mjs` running for several hours and confirm every new sidebar message after the cutoff creates exactly one Desktop entry.
+- Send test messages from at least two different people, including one while Messages is focused and one while it is in the background.
+- Confirm group chats and phone-number-only senders open from sidebar titles.
+- Confirm no duplicate Desktop entries after repeated polls.
+- Confirm Gemma drafts are acceptable enough before any future approval/send feature.
