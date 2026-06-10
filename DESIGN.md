@@ -12,9 +12,11 @@ Mac bridge daemon (Node)
   -> Cheap deterministic policy filters no-op and exact-rule cases
   -> Ollama/Gemma 4 12B drafts from compact context
   -> Ollama/Gemma 4 12B classifies auto-send risk
+  -> Local embedding memory retrieves relevant per-chat notes when indexed
   -> SQLite approval queue records needs_approval | needs_context | unverified_ui_state
   -> Send gate verifies target conversation and exact allowed reply
   -> Local approval API exposes pending requests for a future phone app
+  -> Local dashboard shows profiles, indexing progress, approvals, and health
   -> Local logs capture prompts, decisions, token counts, timings, and actions
   -> Phone app later handles approval, clarification, and manual overrides
 ```
@@ -34,6 +36,7 @@ The production path now has these constraints:
 - Legacy contact-daemon health runs on `127.0.0.1:8790`; the approval API defaults to `127.0.0.1:8787`.
 - Draft monitor health is written to `data/draft-monitor-health.json`.
 - If the sidebar shows a newer preview that cannot be verified in the visible transcript, it is logged as `unverified_ui_state` instead of being discarded.
+- Deep memory indexing runs as an offline/background job, not in the live send path.
 
 ## Why This Shape
 
@@ -103,11 +106,20 @@ The implemented local memory layer uses `data/memory.sqlite3` rather than `chat.
 - `conversation_profiles`: compact Gemma-built per-chat style profiles.
 - `drafts`: proposed replies, token usage, and send status.
 - `approval_requests`: queued approval/context/manual-send/UI-state items.
+- `memory_index_jobs`: background indexing progress.
+- `memory_chunks`: chunk text, Gemma notes, local embedding vectors, and timing metadata.
 - `identity_evidence`: observed names, UI titles, phone numbers, and emails from the Messages details/contact UI.
 
 Initial profile building can use a deeper visible transcript than live drafting. The history ingester scrolls the Messages UI through Accessibility, stores observed bubbles in SQLite, extracts incoming-batch-to-user-reply examples, and asks Gemma to synthesize a compact per-chat profile. The profile prompt is bounded with retry windows and a timeout, and includes deterministic local style stats so Gemma does not overgeneralize casing, punctuation, emoji use, or reply length.
 
 Live drafting should not dump long raw transcripts into Gemma. It should pass the current incoming batch, a bounded recent visible transcript, the compact profile, and a small number of high-signal style examples. Profile confidence is capped by local evidence counts so a profile built from thin data cannot be treated as mature.
+
+For deeper learning, the memory indexer can process about 300 recent messages per
+configured contact offline. It chunks the stored transcript, embeds chunks with a
+local Ollama embedding model, asks Gemma for durable notes per chunk, then asks
+Gemma to refresh the compact profile from those notes plus recent examples.
+Live drafting retrieves only the top few relevant memory notes, so the runtime
+prompt stays lean and old logistics are not treated as current facts.
 
 Identity matching order is:
 
@@ -142,6 +154,11 @@ explicitly overridden for testing. Approval endpoints can approve, reject, add
 context, or create a manual-send request. Sending approved text still requires
 global send gates and a configured contact slug; discovered fallback/sidebar
 contacts remain non-sending until promoted into config.
+
+The same local server serves the Mac dashboard at `/dashboard`. The dashboard is
+intentionally lightweight: it reads health, open approvals, memory index status,
+the current compact profile, and recent chunk notes. It can start a background
+index job for a configured contact, but it does not send messages by itself.
 
 ## Current POC
 

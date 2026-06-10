@@ -221,7 +221,7 @@ function normalizeProfile(profile) {
   return normalized;
 }
 
-async function generateProfile({ prompt }) {
+async function generateProfile({ prompt, numPredict = null, timeoutMs = null } = {}) {
   const result = await generateWithOllama({
     model: DEFAULT_MODEL,
     system: PROFILE_SYSTEM,
@@ -230,9 +230,9 @@ async function generateProfile({ prompt }) {
     options: {
       temperature: 0,
       num_ctx: boundedNumber(process.env.PROFILE_NUM_CTX, 8192, { min: 2048, max: 32768 }),
-      num_predict: boundedNumber(process.env.PROFILE_NUM_PREDICT, 1536, { min: 512, max: 4096 }),
+      num_predict: boundedNumber(numPredict || process.env.PROFILE_NUM_PREDICT, 1536, { min: 512, max: 4096 }),
     },
-    timeoutMs: boundedNumber(process.env.PROFILE_OLLAMA_TIMEOUT_MS || process.env.OLLAMA_TIMEOUT_MS, 90_000, {
+    timeoutMs: boundedNumber(timeoutMs || process.env.PROFILE_OLLAMA_TIMEOUT_MS || process.env.OLLAMA_TIMEOUT_MS, 90_000, {
       min: 10_000,
       max: 600_000,
     }),
@@ -354,15 +354,61 @@ function applyObservedStatsBackstops(profile, stats) {
   };
 }
 
-export async function refreshConversationProfile({ slug, contact = {}, force = false } = {}) {
+function compactDeepMemoryNotes(memoryNotes = []) {
+  const limit = boundedNumber(process.env.MEMORY_PROFILE_NOTE_LIMIT, 12, { max: 40 });
+  const pickList = (value, maxItems, maxChars = 140) =>
+    (Array.isArray(value) ? value : [])
+      .map((entry) => trimText(entry, maxChars).trim())
+      .filter(Boolean)
+      .slice(0, maxItems);
+  return memoryNotes.slice(0, limit).map((note) => {
+    const summary = note.summary || {};
+    return {
+      chunkIndex: note.chunkIndex,
+      messageCount: note.messageCount,
+      observedRange:
+        note.startObservedAt || note.endObservedAt
+          ? {
+              start: note.startObservedAt || null,
+              end: note.endObservedAt || null,
+            }
+          : null,
+      oneLineSummary: trimText(summary.oneLineSummary, 220).trim(),
+      peopleAndContext: pickList(summary.peopleAndContext, 3),
+      userToneSignals: pickList(summary.userToneSignals, 4),
+      relationshipFacts: pickList(summary.relationshipFacts, 3),
+      recurringTopics: pickList(summary.recurringTopics, 3),
+      approvalTriggers: pickList(summary.approvalTriggers, 4),
+      goodStyleExamples: (Array.isArray(summary.goodStyleExamples) ? summary.goodStyleExamples : [])
+        .map((example) => ({
+          incoming: trimText(example?.incoming, 160).trim(),
+          userReply: trimText(example?.userReply, 160).trim(),
+          why: trimText(example?.why, 120).trim(),
+        }))
+        .filter((example) => example.incoming && example.userReply)
+        .slice(0, 2),
+      doNotImitate: pickList(summary.doNotImitate, 3),
+    };
+  });
+}
+
+export async function refreshConversationProfile({
+  slug,
+  contact = {},
+  force = false,
+  messageLimit = null,
+  exampleLimit = null,
+  memoryNotes = null,
+} = {}) {
   const seed = await loadProfileSeed({
     slug,
     contact,
-    messageLimit: boundedNumber(process.env.PROFILE_MESSAGE_LIMIT, 140, { max: 240 }),
-    exampleLimit: boundedNumber(process.env.PROFILE_EXAMPLE_LIMIT, 30, { max: 60 }),
+    messageLimit: boundedNumber(messageLimit || process.env.PROFILE_MESSAGE_LIMIT, 140, { max: 500 }),
+    exampleLimit: boundedNumber(exampleLimit || process.env.PROFILE_EXAMPLE_LIMIT, 30, { max: 120 }),
   });
   const existing = await loadConversationProfile({ slug });
-  if (!force && existing?.profile && seed.messages.length <= existing.sourceMessageCount) {
+  const hasMemoryNotes = Array.isArray(memoryNotes) && memoryNotes.length > 0;
+  if (!force && !hasMemoryNotes && existing?.profile && seed.messages.length <= existing.sourceMessageCount) {
     return {
       refreshed: false,
       profile: existing.profile,
@@ -377,17 +423,29 @@ export async function refreshConversationProfile({ slug, contact = {}, force = f
     throw new Error(`No stored messages for profile '${slug}'. Ingest a visible conversation first.`);
   }
   const localStyleStats = computeLocalStyleStats(seed);
+  const compactMemoryNotes = hasMemoryNotes ? compactDeepMemoryNotes(memoryNotes) : [];
 
-  const evidenceWindows = [
-    {
-      messageLimit: boundedNumber(process.env.PROFILE_COMPACT_MESSAGES, 100, { max: 140 }),
-      exampleLimit: boundedNumber(process.env.PROFILE_COMPACT_EXAMPLES, 20, { max: 30 }),
-      positiveLimit: boundedNumber(process.env.PROFILE_CONTACT_POSITIVE_EXAMPLES, 8, { max: 10 }),
-      negativeLimit: boundedNumber(process.env.PROFILE_CONTACT_NEGATIVE_EXAMPLES, 8, { max: 10 }),
-    },
-    { messageLimit: 60, exampleLimit: 12, positiveLimit: 6, negativeLimit: 6 },
-    { messageLimit: 35, exampleLimit: 7, positiveLimit: 4, negativeLimit: 4 },
-  ];
+  const evidenceWindows = hasMemoryNotes
+    ? [
+        {
+          messageLimit: boundedNumber(process.env.MEMORY_PROFILE_COMPACT_MESSAGES, 60, { max: 160 }),
+          exampleLimit: boundedNumber(process.env.MEMORY_PROFILE_COMPACT_EXAMPLES, 12, { max: 36 }),
+          positiveLimit: boundedNumber(process.env.PROFILE_CONTACT_POSITIVE_EXAMPLES, 8, { max: 10 }),
+          negativeLimit: boundedNumber(process.env.PROFILE_CONTACT_NEGATIVE_EXAMPLES, 8, { max: 10 }),
+        },
+        { messageLimit: 35, exampleLimit: 8, positiveLimit: 6, negativeLimit: 6 },
+        { messageLimit: 20, exampleLimit: 4, positiveLimit: 4, negativeLimit: 4 },
+      ]
+    : [
+        {
+          messageLimit: boundedNumber(process.env.PROFILE_COMPACT_MESSAGES, 120, { max: 220 }),
+          exampleLimit: boundedNumber(process.env.PROFILE_COMPACT_EXAMPLES, 24, { max: 50 }),
+          positiveLimit: boundedNumber(process.env.PROFILE_CONTACT_POSITIVE_EXAMPLES, 8, { max: 10 }),
+          negativeLimit: boundedNumber(process.env.PROFILE_CONTACT_NEGATIVE_EXAMPLES, 8, { max: 10 }),
+        },
+        { messageLimit: 60, exampleLimit: 12, positiveLimit: 6, negativeLimit: 6 },
+        { messageLimit: 35, exampleLimit: 7, positiveLimit: 4, negativeLimit: 4 },
+      ];
   let generated = null;
   let lastError = null;
   for (const window of evidenceWindows) {
@@ -398,9 +456,11 @@ export async function refreshConversationProfile({ slug, contact = {}, force = f
         contact: compactContact(contact, slug, window),
         existingProfile: existing?.profile || null,
         localStyleStats,
+        deepMemoryNotes: compactMemoryNotes,
         evidence: compact,
         outputRules: [
           "Favor the user's actual outgoing replies and extracted incoming-to-reply examples over guesses.",
+          "Use deepMemoryNotes to understand long-range context and repeated patterns without copying stale one-off details.",
           "Use localStyleStats to avoid overgeneralizing casing, punctuation, emoji frequency, or reply length.",
           "Use configured writeLikeThis/doNotWriteLikeThis examples only as style guardrails, not as transcript facts.",
           "Capture patterns the live drafter can use without seeing the full transcript.",
@@ -415,7 +475,11 @@ export async function refreshConversationProfile({ slug, contact = {}, force = f
       2
     );
     try {
-      generated = await generateProfile({ prompt });
+      generated = await generateProfile({
+        prompt,
+        numPredict: hasMemoryNotes ? process.env.MEMORY_PROFILE_NUM_PREDICT || 800 : null,
+        timeoutMs: hasMemoryNotes ? process.env.MEMORY_PROFILE_TIMEOUT_MS || 150_000 : null,
+      });
       break;
     } catch (error) {
       lastError = error;

@@ -260,6 +260,13 @@ function compactMemoryContext(memoryContext, policy = null) {
         })),
         userReply: trimText(example.replyText, 500),
       })),
+    relevantMemories: (memoryContext.relevantMemories || []).slice(0, 6).map((memory) => ({
+      score: typeof memory.score === "number" ? Number(memory.score.toFixed(3)) : null,
+      summary: memory.summary || {},
+      messageCount: memory.messageCount || 0,
+      startObservedAt: memory.startObservedAt || null,
+      endObservedAt: memory.endObservedAt || null,
+    })),
   };
 }
 
@@ -580,6 +587,11 @@ function buildDraftPrompt({ compactVisible, contact, compactMemory, contrastiveE
           }
         : null,
       memoryContext: compactMemory,
+      memoryUseRules: [
+        "Use relevantMemories only when they clearly help interpret the current message or match the user's voice.",
+        "Do not treat old logistics, old plans, or one-off events as current facts.",
+        "Never make a commitment just because a retrieved memory mentions similar plans.",
+      ],
       contrastiveStyleExamples: {
         instruction:
           "Imitate only writeLikeThis examples. Never imitate doNotWriteLikeThis examples; use whyBad to avoid those failure modes.",

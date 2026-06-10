@@ -1,0 +1,589 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Messages Assistant</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f7f8fa;
+        --panel: #ffffff;
+        --text: #111827;
+        --muted: #64748b;
+        --line: #d8dee8;
+        --green: #0f766e;
+        --amber: #b45309;
+        --red: #b91c1c;
+        --blue: #2563eb;
+        --ink: #26313f;
+        --soft: #eef3f8;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-size: 14px;
+      }
+
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 18px 24px;
+        border-bottom: 1px solid var(--line);
+        background: var(--panel);
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 20px;
+        font-weight: 650;
+        letter-spacing: 0;
+      }
+
+      h2 {
+        margin: 0 0 12px;
+        font-size: 15px;
+        letter-spacing: 0;
+      }
+
+      button,
+      select,
+      input {
+        font: inherit;
+      }
+
+      button {
+        min-height: 32px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: #ffffff;
+        color: var(--text);
+        padding: 6px 10px;
+        cursor: pointer;
+      }
+
+      button.primary {
+        background: var(--ink);
+        border-color: var(--ink);
+        color: #ffffff;
+      }
+
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      main {
+        display: grid;
+        grid-template-columns: minmax(300px, 420px) minmax(0, 1fr);
+        gap: 18px;
+        padding: 18px 24px 32px;
+      }
+
+      section {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+      }
+
+      .section-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 14px 14px 0;
+      }
+
+      .section-body {
+        padding: 14px;
+      }
+
+      .status-strip {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: center;
+        color: var(--muted);
+      }
+
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 4px 8px;
+        background: var(--soft);
+        color: var(--muted);
+        white-space: nowrap;
+      }
+
+      .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--muted);
+      }
+
+      .dot.ok {
+        background: var(--green);
+      }
+
+      .dot.warn {
+        background: var(--amber);
+      }
+
+      .dot.bad {
+        background: var(--red);
+      }
+
+      .stack {
+        display: grid;
+        gap: 14px;
+      }
+
+      .list {
+        display: grid;
+        gap: 8px;
+      }
+
+      .row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 12px;
+        align-items: center;
+        padding: 10px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: #ffffff;
+      }
+
+      .row.active {
+        border-color: var(--blue);
+        box-shadow: inset 3px 0 0 var(--blue);
+      }
+
+      .title {
+        font-weight: 650;
+        overflow-wrap: anywhere;
+      }
+
+      .meta {
+        margin-top: 4px;
+        color: var(--muted);
+        font-size: 12px;
+        overflow-wrap: anywhere;
+      }
+
+      .progress {
+        width: 100%;
+        height: 8px;
+        margin-top: 8px;
+        border-radius: 999px;
+        overflow: hidden;
+        background: #e5eaf1;
+      }
+
+      .bar {
+        height: 100%;
+        width: 0;
+        background: linear-gradient(90deg, var(--green), var(--blue));
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .metric {
+        border-top: 1px solid var(--line);
+        padding-top: 10px;
+      }
+
+      .metric strong {
+        display: block;
+        font-size: 22px;
+        letter-spacing: 0;
+      }
+
+      .metric span {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .profile {
+        display: grid;
+        gap: 12px;
+      }
+
+      .profile-block {
+        border-top: 1px solid var(--line);
+        padding-top: 12px;
+      }
+
+      .profile-block:first-child {
+        border-top: 0;
+        padding-top: 0;
+      }
+
+      ul {
+        margin: 8px 0 0;
+        padding-left: 18px;
+      }
+
+      li {
+        margin: 4px 0;
+      }
+
+      .chunks {
+        display: grid;
+        gap: 10px;
+      }
+
+      .chunk {
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 10px;
+      }
+
+      .toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+      }
+
+      .toolbar label {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        color: var(--muted);
+      }
+
+      input[type="number"] {
+        width: 86px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 6px 8px;
+      }
+
+      .empty {
+        color: var(--muted);
+        padding: 12px 0;
+      }
+
+      @media (max-width: 900px) {
+        header {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+
+        main {
+          grid-template-columns: 1fr;
+          padding: 14px;
+        }
+
+        .grid {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div>
+        <h1>Messages Assistant</h1>
+        <div class="status-strip" id="topStatus"></div>
+      </div>
+      <div class="toolbar">
+        <button id="refreshButton" title="Refresh dashboard">Refresh</button>
+      </div>
+    </header>
+
+    <main>
+      <div class="stack">
+        <section>
+          <div class="section-head">
+            <h2>Conversations</h2>
+          </div>
+          <div class="section-body">
+            <div id="conversationList" class="list"></div>
+          </div>
+        </section>
+
+        <section>
+          <div class="section-head">
+            <h2>Approvals</h2>
+          </div>
+          <div class="section-body">
+            <div id="approvalList" class="list"></div>
+          </div>
+        </section>
+      </div>
+
+      <section>
+        <div class="section-head">
+          <h2 id="detailTitle">Profile</h2>
+          <div class="toolbar">
+            <label>Limit <input id="limitInput" type="number" min="20" max="1000" value="300" /></label>
+            <label><input id="ingestInput" type="checkbox" /> Ingest</label>
+            <button id="indexButton" class="primary" title="Start memory indexing">Index</button>
+          </div>
+        </div>
+        <div class="section-body">
+          <div id="detailBody" class="profile"></div>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      const state = {
+        health: null,
+        conversations: [],
+        approvals: [],
+        selectedSlug: null,
+        selectedDetail: null,
+      };
+
+      const $ = (id) => document.getElementById(id);
+
+      function fmtDate(value) {
+        if (!value) return "never";
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) return value;
+        return date.toLocaleString();
+      }
+
+      function pct(done, total) {
+        if (!total) return 0;
+        return Math.max(0, Math.min(100, Math.round((done / total) * 100)));
+      }
+
+      function statusDot(ok, warn = false) {
+        return `<span class="dot ${ok ? "ok" : warn ? "warn" : "bad"}"></span>`;
+      }
+
+      function pill(label, ok = true, warn = false) {
+        return `<span class="pill">${statusDot(ok, warn)}${label}</span>`;
+      }
+
+      function profileText(profile, key) {
+        return profile && profile[key] ? profile[key] : "";
+      }
+
+      function listItems(items) {
+        if (!items || !items.length) return `<div class="empty">None</div>`;
+        return `<ul>${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
+      }
+
+      function escapeHtml(value) {
+        return String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#039;");
+      }
+
+      async function api(path, options = {}) {
+        const res = await fetch(path, {
+          ...options,
+          headers: {
+            "content-type": "application/json",
+            ...(options.headers || {}),
+          },
+        });
+        const body = await res.json();
+        if (!res.ok || body.ok === false) throw new Error(body.error || `${res.status} ${res.statusText}`);
+        return body;
+      }
+
+      async function refresh() {
+        $("refreshButton").disabled = true;
+        try {
+          const [health, memory, approvals] = await Promise.all([
+            api("/health"),
+            api("/memory/status"),
+            api("/approvals?status=open&limit=20"),
+          ]);
+          state.health = health;
+          state.conversations = memory.conversations || [];
+          state.approvals = approvals.approvals || [];
+          if (!state.selectedSlug && state.conversations.length) {
+            state.selectedSlug = state.conversations[0].slug;
+          }
+          await loadSelected();
+          render();
+        } catch (error) {
+          $("topStatus").innerHTML = pill(error.message, false);
+        } finally {
+          $("refreshButton").disabled = false;
+        }
+      }
+
+      async function loadSelected() {
+        if (!state.selectedSlug) {
+          state.selectedDetail = null;
+          return;
+        }
+        state.selectedDetail = await api(`/memory/${encodeURIComponent(state.selectedSlug)}?limit=12`);
+      }
+
+      function renderTop() {
+        const monitor = state.health?.monitor;
+        const pending = state.approvals.length;
+        $("topStatus").innerHTML = [
+          pill(`Monitor ${monitor?.ok ? "ok" : "unknown"}`, monitor?.ok === true, monitor && monitor.ok !== true),
+          pill(`Approvals ${pending}`, pending === 0, pending > 0),
+          pill(`Conversations ${state.conversations.length}`, true),
+          pill(`Updated ${fmtDate(state.health?.time)}`, true),
+        ].join("");
+      }
+
+      function renderConversations() {
+        $("conversationList").innerHTML =
+          state.conversations
+            .map((item) => {
+              const done = Math.max(item.embeddedChunkCount || 0, item.summarizedChunkCount || 0);
+              const total = item.chunkCount || item.latestJob?.targetMessageCount || 0;
+              const percent = item.chunkCount ? pct(done, item.chunkCount * 2) : 0;
+              const active = item.slug === state.selectedSlug ? " active" : "";
+              return `
+                <button class="row${active}" data-slug="${escapeHtml(item.slug)}">
+                  <span>
+                    <span class="title">${escapeHtml(item.displayName || item.slug)}</span>
+                    <span class="meta">${escapeHtml(item.slug)} | ${item.messageCount || 0} messages | ${item.chunkCount || 0} chunks</span>
+                    <span class="progress"><span class="bar" style="width:${percent}%"></span></span>
+                  </span>
+                  <span class="pill">${escapeHtml(item.latestJob?.status || item.profile?.confidence || "new")}</span>
+                </button>`;
+            })
+            .join("") || `<div class="empty">No conversations</div>`;
+        $("conversationList").querySelectorAll("[data-slug]").forEach((button) => {
+          button.addEventListener("click", async () => {
+            state.selectedSlug = button.dataset.slug;
+            await loadSelected();
+            render();
+          });
+        });
+      }
+
+      function renderApprovals() {
+        $("approvalList").innerHTML =
+          state.approvals
+            .map((item) => `
+              <div class="row">
+                <span>
+                  <span class="title">${escapeHtml(item.conversationSlug)}</span>
+                  <span class="meta">${escapeHtml(item.status)} | ${escapeHtml(item.reason || "")}</span>
+                </span>
+                <span class="pill">${escapeHtml(item.action)}</span>
+              </div>`)
+            .join("") || `<div class="empty">No open approvals</div>`;
+      }
+
+      function renderDetail() {
+        const detail = state.selectedDetail;
+        const conversation = detail?.conversation;
+        const profile = conversation?.profile;
+        $("detailTitle").textContent = conversation ? conversation.displayName || conversation.slug : "Profile";
+        $("indexButton").disabled = !conversation;
+        if (!conversation) {
+          $("detailBody").innerHTML = `<div class="empty">No conversation selected</div>`;
+          return;
+        }
+
+        const chunks = detail.chunks || [];
+        $("detailBody").innerHTML = `
+          <div class="grid">
+            <div class="metric"><strong>${conversation.messageCount || 0}</strong><span>Messages</span></div>
+            <div class="metric"><strong>${conversation.chunkCount || 0}</strong><span>Chunks</span></div>
+            <div class="metric"><strong>${conversation.embeddedChunkCount || 0}</strong><span>Embedded</span></div>
+          </div>
+          <div class="profile-block">
+            <div class="meta">Latest job: ${escapeHtml(conversation.latestJob?.status || "none")} | Profile: ${escapeHtml(profile?.confidence || "none")} | Updated ${fmtDate(conversation.profileUpdatedAt)}</div>
+          </div>
+          <div class="profile-block">
+            <h2>Relationship</h2>
+            <div>${escapeHtml(profileText(profile, "relationshipSummary") || "No profile yet")}</div>
+          </div>
+          <div class="profile-block">
+            <h2>Tone</h2>
+            <div>${escapeHtml(profileText(profile, "toneSummary") || "No tone profile yet")}</div>
+            ${listItems(profile?.userVoiceRules)}
+          </div>
+          <div class="profile-block">
+            <h2>Topics</h2>
+            ${listItems(profile?.recurringTopics)}
+          </div>
+          <div class="profile-block">
+            <h2>Ask Before</h2>
+            ${listItems(profile?.askUserBefore)}
+          </div>
+          <div class="profile-block">
+            <h2>Do Not Imitate</h2>
+            ${listItems(profile?.doNotImitate)}
+          </div>
+          <div class="profile-block">
+            <h2>Memory Chunks</h2>
+            <div class="chunks">
+              ${
+                chunks.length
+                  ? chunks
+                      .map((chunk) => `
+                        <div class="chunk">
+                          <div class="title">Chunk ${chunk.chunkIndex + 1}</div>
+                          <div class="meta">${chunk.messageCount} messages | ${fmtDate(chunk.startObservedAt)} to ${fmtDate(chunk.endObservedAt)}</div>
+                          <div>${escapeHtml(chunk.summary?.oneLineSummary || "No summary")}</div>
+                        </div>`)
+                      .join("")
+                  : `<div class="empty">No chunks indexed</div>`
+              }
+            </div>
+          </div>`;
+      }
+
+      function render() {
+        renderTop();
+        renderConversations();
+        renderApprovals();
+        renderDetail();
+      }
+
+      async function startIndex() {
+        if (!state.selectedSlug) return;
+        $("indexButton").disabled = true;
+        try {
+          await api(`/memory/${encodeURIComponent(state.selectedSlug)}/index`, {
+            method: "POST",
+            body: JSON.stringify({
+              limit: Number($("limitInput").value || 300),
+              ingest: $("ingestInput").checked,
+              force: true,
+            }),
+          });
+          setTimeout(refresh, 1200);
+        } catch (error) {
+          $("topStatus").innerHTML = pill(error.message, false);
+        } finally {
+          $("indexButton").disabled = false;
+        }
+      }
+
+      $("refreshButton").addEventListener("click", refresh);
+      $("indexButton").addEventListener("click", startIndex);
+      refresh();
+      setInterval(refresh, 15000);
+    </script>
+  </body>
+</html>

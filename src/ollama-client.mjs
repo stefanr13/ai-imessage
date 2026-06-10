@@ -1,4 +1,5 @@
 export const DEFAULT_OLLAMA_URL = process.env.OLLAMA_URL || "http://localhost:11434";
+export const DEFAULT_EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || "nomic-embed-text";
 
 async function readJsonResponse(res) {
   const text = await res.text();
@@ -29,10 +30,11 @@ export async function listOllamaModels() {
 export async function assertOllamaModelAvailable(model) {
   const models = await listOllamaModels();
   const names = models.map((entry) => entry.name);
-  if (!names.includes(model)) {
+  const match = models.find((entry) => entry.name === model || entry.name === `${model}:latest`);
+  if (!match) {
     throw new Error(`Ollama model '${model}' is not installed. Available models: ${names.join(", ") || "none"}`);
   }
-  return models.find((entry) => entry.name === model);
+  return match;
 }
 
 export async function generateWithOllama({
@@ -57,6 +59,7 @@ export async function generateWithOllama({
   const controller = timeoutMs > 0 ? new AbortController() : null;
   const timeout = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
   let res;
+  let body;
   try {
     res = await fetch(`${DEFAULT_OLLAMA_URL}/api/generate`, {
       method: "POST",
@@ -64,21 +67,22 @@ export async function generateWithOllama({
       body: JSON.stringify(requestBody),
       signal: controller?.signal,
     });
+
+    if (!res.ok) {
+      const responseText = await res.text();
+      throw new Error(`Ollama error ${res.status}: ${responseText}`);
+    }
+
+    body = await readJsonResponse(res);
   } catch (error) {
     if (error?.name === "AbortError") {
       throw new Error(`Ollama request timed out after ${timeoutMs}ms.`);
     }
     throw error;
   } finally {
-    if (timeout) clearTimeout(timeout);
+      if (timeout) clearTimeout(timeout);
   }
 
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Ollama error ${res.status}: ${body}`);
-  }
-
-  const body = await readJsonResponse(res);
   return {
     raw: body,
     text: body.response || "",
@@ -91,6 +95,68 @@ export async function generateWithOllama({
       promptEvalDurationNs: body.prompt_eval_duration || 0,
       evalDurationNs: body.eval_duration || 0,
       totalDurationNs: body.total_duration || 0,
+    },
+  };
+}
+
+export async function embedWithOllama({
+  model = DEFAULT_EMBEDDING_MODEL,
+  input,
+  options = {},
+  keepAlive = process.env.OLLAMA_EMBED_KEEP_ALIVE || "5m",
+  timeoutMs = Number(process.env.OLLAMA_EMBED_TIMEOUT_MS || process.env.OLLAMA_TIMEOUT_MS || 0),
+}) {
+  const inputs = Array.isArray(input) ? input : [input];
+  if (!inputs.length || inputs.some((value) => typeof value !== "string")) {
+    throw new Error("embedWithOllama requires a string or array of strings.");
+  }
+  const requestBody = {
+    model,
+    input: inputs,
+    options,
+    keep_alive: keepAlive,
+  };
+
+  const controller = timeoutMs > 0 ? new AbortController() : null;
+  const timeout = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  let res;
+  let body;
+  try {
+    res = await fetch(`${DEFAULT_OLLAMA_URL}/api/embed`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(requestBody),
+      signal: controller?.signal,
+    });
+
+    if (!res.ok) {
+      const responseText = await res.text();
+      throw new Error(`Ollama embedding error ${res.status}: ${responseText}`);
+    }
+
+    body = await readJsonResponse(res);
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(`Ollama embedding request timed out after ${timeoutMs}ms.`);
+    }
+    throw error;
+  } finally {
+      if (timeout) clearTimeout(timeout);
+  }
+
+  const embeddings = body.embeddings || [];
+  if (!Array.isArray(embeddings) || embeddings.length !== inputs.length) {
+    throw new Error(`Ollama returned ${embeddings.length} embeddings for ${inputs.length} inputs.`);
+  }
+  return {
+    raw: body,
+    embeddings,
+    model: body.model || model,
+    usage: {
+      promptTokens: body.prompt_eval_count || 0,
+      totalTokens: body.prompt_eval_count || 0,
+      totalDurationNs: body.total_duration || 0,
+      loadDurationNs: body.load_duration || 0,
     },
   };
 }

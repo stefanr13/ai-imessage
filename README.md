@@ -7,6 +7,7 @@ Local-first iMessage assistant prototype using a custom macOS Accessibility brid
 - Swift helper controls Messages through narrow commands.
 - Node orchestrator handles retries, state, idempotency, and send gates.
 - Ollama runs `gemma4:12b` locally.
+- Local embeddings can run through Ollama for per-chat memory retrieval.
 - Draft monitor polls Messages sidebar rows and spends zero model tokens unless a new actionable message appears.
 - Local approval API exposes pending context/approval/manual-send work for the future phone app.
 - Logs are sanitized by default.
@@ -309,8 +310,78 @@ Future live drafts receive:
 - the recent visible transcript
 - the compact per-conversation profile
 - a few examples of how you have replied in that specific conversation
+- a few relevant indexed memory notes when local embeddings are available
 
 Thin evidence is confidence-capped locally, so a small or test-heavy transcript cannot mark itself as high-confidence just because the model says so.
+
+## Deep Memory Index
+
+The deeper memory layer is local-first:
+
+- recent visible messages are stored in `data/memory.sqlite3`
+- messages are chunked into small conversation windows
+- each chunk can be embedded locally with Ollama
+- Gemma extracts durable notes from each chunk
+- Gemma refreshes the compact conversation profile using chunk notes plus recent examples
+
+Install the default lightweight embedding model:
+
+```bash
+./scripts/setup-embedding-model.sh
+```
+
+Build a 300-message memory index for one configured contact:
+
+```bash
+node scripts/build-memory-index.mjs close-family --limit 300
+```
+
+If you want the script to scroll Messages first and ingest more history:
+
+```bash
+node scripts/build-memory-index.mjs close-family --ingest --limit 300 --max-pages 70
+```
+
+Build for every enabled configured contact:
+
+```bash
+node scripts/build-memory-index.mjs --all-configured --limit 300
+```
+
+Useful lower-risk test modes:
+
+```bash
+node scripts/build-memory-index.mjs close-family --status
+node scripts/build-memory-index.mjs close-family --skip-embeddings --skip-summaries --no-refresh
+```
+
+The default embedding model is `nomic-embed-text`, chosen because it is small
+enough for the M1 Mac mini. Override with `EMBEDDING_MODEL=bge-m3` or
+`--embedding-model bge-m3` after pulling that model if you want richer retrieval.
+
+Live drafting uses indexed memory opportunistically. If the embedding model is
+missing or busy, the monitor falls back to the existing profile/examples path
+instead of failing.
+
+## Mac Dashboard
+
+The local approval API also serves a lightweight dashboard:
+
+```bash
+node server.mjs
+open http://127.0.0.1:8787/dashboard
+```
+
+The dashboard shows:
+
+- monitor health
+- open approvals
+- per-conversation message/chunk/profile progress
+- the current compact profile
+- recent memory chunk notes
+
+It can start a background memory indexing job for a configured contact. Binding
+the API to the LAN for phone access should use `BRIDGE_TOKEN`.
 
 The example contact has a stricter style policy in config:
 

@@ -7,7 +7,7 @@ import { normalizeComparableText, stableHash } from "./transcript.mjs";
 export const DEFAULT_MEMORY_DB_PATH = process.env.MEMORY_DB || path.join(repoRoot, "data", "memory.sqlite3");
 
 function runSql(sql, { dbPath = DEFAULT_MEMORY_DB_PATH, json = false } = {}) {
-  const args = json ? ["-json", dbPath, sql] : [dbPath, sql];
+  const args = json ? ["-cmd", ".timeout 5000", "-json", dbPath, sql] : ["-cmd", ".timeout 5000", dbPath, sql];
   return new Promise((resolve, reject) => {
     execFile("sqlite3", args, { cwd: repoRoot, maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
       if (error) {
@@ -146,6 +146,55 @@ CREATE INDEX IF NOT EXISTS idx_approval_requests_status_updated
 
 CREATE INDEX IF NOT EXISTS idx_approval_requests_conversation_updated
   ON approval_requests(conversation_slug, updated_at);
+
+CREATE TABLE IF NOT EXISTS memory_index_jobs (
+  id TEXT PRIMARY KEY,
+  conversation_slug TEXT NOT NULL REFERENCES conversations(slug) ON DELETE CASCADE,
+  status TEXT NOT NULL,
+  target_message_count INTEGER NOT NULL DEFAULT 0,
+  observed_message_count INTEGER NOT NULL DEFAULT 0,
+  chunk_count INTEGER NOT NULL DEFAULT 0,
+  embedded_chunk_count INTEGER NOT NULL DEFAULT 0,
+  summarized_chunk_count INTEGER NOT NULL DEFAULT 0,
+  embedding_model TEXT,
+  profile_model TEXT,
+  options_json TEXT NOT NULL DEFAULT '{}',
+  error TEXT,
+  started_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  completed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_index_jobs_conversation_updated
+  ON memory_index_jobs(conversation_slug, updated_at);
+
+CREATE TABLE IF NOT EXISTS memory_chunks (
+  id TEXT PRIMARY KEY,
+  conversation_slug TEXT NOT NULL REFERENCES conversations(slug) ON DELETE CASCADE,
+  chunk_index INTEGER NOT NULL,
+  source_message_ids_json TEXT NOT NULL DEFAULT '[]',
+  start_observed_at TEXT,
+  end_observed_at TEXT,
+  message_count INTEGER NOT NULL DEFAULT 0,
+  text TEXT NOT NULL,
+  summary_json TEXT NOT NULL DEFAULT '{}',
+  summary_model TEXT,
+  summary_usage_json TEXT,
+  summarized_at TEXT,
+  embedding_model TEXT,
+  embedding_json TEXT,
+  embedding_dim INTEGER,
+  embedding_norm REAL,
+  embedded_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_chunks_conversation_index
+  ON memory_chunks(conversation_slug, chunk_index);
+
+CREATE INDEX IF NOT EXISTS idx_memory_chunks_conversation_updated
+  ON memory_chunks(conversation_slug, updated_at);
 
 CREATE TABLE IF NOT EXISTS identity_evidence (
   id TEXT PRIMARY KEY,
@@ -524,6 +573,395 @@ export async function getMemoryContext({ slug, contact = {}, dbPath = DEFAULT_ME
     profileUpdatedAt: profile?.updatedAt || null,
     styleExamples: examples,
   };
+}
+
+export async function loadMessagesForMemory({ slug, limit = 300, dbPath = DEFAULT_MEMORY_DB_PATH }) {
+  await ensureMemoryDb(dbPath);
+  const rows = await queryJson(
+    `
+SELECT id, direction, sender, text, raw_description, visible_order, last_seen_at
+FROM messages
+WHERE conversation_slug = ${sqlValue(slug)}
+ORDER BY last_seen_at DESC, visible_order DESC
+LIMIT ${sqlValue(Math.max(1, Math.min(Number(limit) || 300, 2000)))};
+`,
+    { dbPath }
+  );
+  return rows.reverse().map((row) => ({
+    id: row.id,
+    direction: row.direction,
+    sender: row.sender || null,
+    text: row.text,
+    rawDescription: row.raw_description || null,
+    visibleOrder: row.visible_order,
+    observedAt: row.last_seen_at,
+  }));
+}
+
+export async function startMemoryIndexJob({
+  slug,
+  targetMessageCount = 300,
+  observedMessageCount = 0,
+  embeddingModel = null,
+  profileModel = null,
+  options = {},
+  dbPath = DEFAULT_MEMORY_DB_PATH,
+}) {
+  await ensureMemoryDb(dbPath);
+  const at = nowIso();
+  const id = stableHash({
+    type: "memory-index-job",
+    slug,
+    targetMessageCount,
+    embeddingModel,
+    profileModel,
+    at,
+  });
+  await runSql(
+    `
+INSERT INTO memory_index_jobs (
+  id, conversation_slug, status, target_message_count, observed_message_count,
+  embedding_model, profile_model, options_json, started_at, updated_at
+) VALUES (
+  ${sqlValue(id)},
+  ${sqlValue(slug)},
+  'running',
+  ${sqlValue(targetMessageCount)},
+  ${sqlValue(observedMessageCount)},
+  ${sqlValue(embeddingModel || null)},
+  ${sqlValue(profileModel || null)},
+  ${sqlJson(options || {})},
+  ${sqlValue(at)},
+  ${sqlValue(at)}
+);
+`,
+    { dbPath }
+  );
+  return getMemoryIndexJob(id, { dbPath });
+}
+
+export async function updateMemoryIndexJob({
+  id,
+  status = null,
+  observedMessageCount = null,
+  chunkCount = null,
+  embeddedChunkCount = null,
+  summarizedChunkCount = null,
+  error = null,
+  completed = false,
+  dbPath = DEFAULT_MEMORY_DB_PATH,
+}) {
+  await ensureMemoryDb(dbPath);
+  const at = nowIso();
+  await runSql(
+    `
+UPDATE memory_index_jobs
+SET
+  status = COALESCE(${sqlValue(status)}, status),
+  observed_message_count = COALESCE(${sqlValue(observedMessageCount)}, observed_message_count),
+  chunk_count = COALESCE(${sqlValue(chunkCount)}, chunk_count),
+  embedded_chunk_count = COALESCE(${sqlValue(embeddedChunkCount)}, embedded_chunk_count),
+  summarized_chunk_count = COALESCE(${sqlValue(summarizedChunkCount)}, summarized_chunk_count),
+  error = ${error === null ? "error" : sqlValue(error)},
+  updated_at = ${sqlValue(at)},
+  completed_at = ${completed ? sqlValue(at) : "completed_at"}
+WHERE id = ${sqlValue(id)};
+`,
+    { dbPath }
+  );
+  return getMemoryIndexJob(id, { dbPath });
+}
+
+export async function getMemoryIndexJob(id, { dbPath = DEFAULT_MEMORY_DB_PATH } = {}) {
+  await ensureMemoryDb(dbPath);
+  const rows = await queryJson(
+    `
+SELECT *
+FROM memory_index_jobs
+WHERE id = ${sqlValue(id)}
+LIMIT 1;
+`,
+    { dbPath }
+  );
+  return rowToMemoryIndexJob(rows[0] || null);
+}
+
+function rowToMemoryIndexJob(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    conversationSlug: row.conversation_slug,
+    status: row.status,
+    targetMessageCount: Number(row.target_message_count || 0),
+    observedMessageCount: Number(row.observed_message_count || 0),
+    chunkCount: Number(row.chunk_count || 0),
+    embeddedChunkCount: Number(row.embedded_chunk_count || 0),
+    summarizedChunkCount: Number(row.summarized_chunk_count || 0),
+    embeddingModel: row.embedding_model || null,
+    profileModel: row.profile_model || null,
+    options: parseJsonField(row.options_json, {}),
+    error: row.error || null,
+    startedAt: row.started_at,
+    updatedAt: row.updated_at,
+    completedAt: row.completed_at || null,
+  };
+}
+
+function vectorNorm(vector) {
+  if (!Array.isArray(vector)) return null;
+  const sumSquares = vector.reduce((sum, value) => sum + Number(value || 0) ** 2, 0);
+  return Math.sqrt(sumSquares);
+}
+
+function rowToMemoryChunk(row, { includeText = true, includeEmbedding = false } = {}) {
+  if (!row) return null;
+  const embedding = includeEmbedding ? parseJsonField(row.embedding_json, null) : null;
+  return {
+    id: row.id,
+    conversationSlug: row.conversation_slug,
+    chunkIndex: Number(row.chunk_index || 0),
+    sourceMessageIds: parseJsonField(row.source_message_ids_json, []),
+    startObservedAt: row.start_observed_at || null,
+    endObservedAt: row.end_observed_at || null,
+    messageCount: Number(row.message_count || 0),
+    ...(includeText ? { text: row.text || "" } : { textChars: String(row.text || "").length }),
+    summary: parseJsonField(row.summary_json, {}),
+    summaryModel: row.summary_model || null,
+    summaryUsage: parseJsonField(row.summary_usage_json, null),
+    summarizedAt: row.summarized_at || null,
+    embeddingModel: row.embedding_model || null,
+    embeddingDim: row.embedding_dim || null,
+    embeddingNorm: row.embedding_norm || null,
+    ...(includeEmbedding ? { embedding } : {}),
+    embeddedAt: row.embedded_at || null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export async function upsertMemoryChunk({
+  id,
+  conversationSlug,
+  chunkIndex,
+  sourceMessageIds = [],
+  startObservedAt = null,
+  endObservedAt = null,
+  messageCount = 0,
+  text,
+  dbPath = DEFAULT_MEMORY_DB_PATH,
+}) {
+  await ensureMemoryDb(dbPath);
+  const at = nowIso();
+  await runSql(
+    `
+INSERT INTO memory_chunks (
+  id, conversation_slug, chunk_index, source_message_ids_json, start_observed_at,
+  end_observed_at, message_count, text, created_at, updated_at
+) VALUES (
+  ${sqlValue(id)},
+  ${sqlValue(conversationSlug)},
+  ${sqlValue(chunkIndex)},
+  ${sqlJson(sourceMessageIds)},
+  ${sqlValue(startObservedAt || null)},
+  ${sqlValue(endObservedAt || null)},
+  ${sqlValue(messageCount)},
+  ${sqlValue(text || "")},
+  ${sqlValue(at)},
+  ${sqlValue(at)}
+)
+ON CONFLICT(id) DO UPDATE SET
+  chunk_index = excluded.chunk_index,
+  source_message_ids_json = excluded.source_message_ids_json,
+  start_observed_at = excluded.start_observed_at,
+  end_observed_at = excluded.end_observed_at,
+  message_count = excluded.message_count,
+  text = excluded.text,
+  updated_at = excluded.updated_at;
+`,
+    { dbPath }
+  );
+  return getMemoryChunk(id, { dbPath });
+}
+
+export async function getMemoryChunk(id, { dbPath = DEFAULT_MEMORY_DB_PATH } = {}) {
+  await ensureMemoryDb(dbPath);
+  const rows = await queryJson(
+    `
+SELECT *
+FROM memory_chunks
+WHERE id = ${sqlValue(id)}
+LIMIT 1;
+`,
+    { dbPath }
+  );
+  return rowToMemoryChunk(rows[0] || null);
+}
+
+export async function listMemoryChunks({
+  slug,
+  limit = 100,
+  includeText = true,
+  includeEmbedding = false,
+  dbPath = DEFAULT_MEMORY_DB_PATH,
+}) {
+  await ensureMemoryDb(dbPath);
+  const rows = await queryJson(
+    `
+SELECT *
+FROM memory_chunks
+WHERE conversation_slug = ${sqlValue(slug)}
+ORDER BY chunk_index ASC
+LIMIT ${sqlValue(Math.max(1, Math.min(Number(limit) || 100, 2000)))};
+`,
+    { dbPath }
+  );
+  return rows.map((row) => rowToMemoryChunk(row, { includeText, includeEmbedding }));
+}
+
+export async function updateMemoryChunkSummary({
+  id,
+  summary,
+  model,
+  usage = null,
+  dbPath = DEFAULT_MEMORY_DB_PATH,
+}) {
+  await ensureMemoryDb(dbPath);
+  const at = nowIso();
+  await runSql(
+    `
+UPDATE memory_chunks
+SET
+  summary_json = ${sqlJson(summary || {})},
+  summary_model = ${sqlValue(model || null)},
+  summary_usage_json = ${sqlJson(usage || null)},
+  summarized_at = ${sqlValue(at)},
+  updated_at = ${sqlValue(at)}
+WHERE id = ${sqlValue(id)};
+`,
+    { dbPath }
+  );
+  return getMemoryChunk(id, { dbPath });
+}
+
+export async function updateMemoryChunkEmbedding({
+  id,
+  embedding,
+  model,
+  dbPath = DEFAULT_MEMORY_DB_PATH,
+}) {
+  await ensureMemoryDb(dbPath);
+  const at = nowIso();
+  const norm = vectorNorm(embedding);
+  await runSql(
+    `
+UPDATE memory_chunks
+SET
+  embedding_model = ${sqlValue(model || null)},
+  embedding_json = ${sqlJson(embedding || null)},
+  embedding_dim = ${sqlValue(Array.isArray(embedding) ? embedding.length : null)},
+  embedding_norm = ${sqlValue(norm)},
+  embedded_at = ${sqlValue(at)},
+  updated_at = ${sqlValue(at)}
+WHERE id = ${sqlValue(id)};
+`,
+    { dbPath }
+  );
+  return getMemoryChunk(id, { dbPath });
+}
+
+export async function getConversationMemoryStatus({ slug, dbPath = DEFAULT_MEMORY_DB_PATH }) {
+  const rows = await listConversationMemoryStatuses({ dbPath });
+  return rows.find((row) => row.slug === slug) || null;
+}
+
+export async function listConversationMemoryStatuses({ dbPath = DEFAULT_MEMORY_DB_PATH } = {}) {
+  await ensureMemoryDb(dbPath);
+  const rows = await queryJson(
+    `
+SELECT
+  c.slug,
+  c.display_name,
+  c.relationship,
+  c.sidebar_title,
+  c.updated_at AS conversation_updated_at,
+  (SELECT count(*) FROM messages m WHERE m.conversation_slug = c.slug) AS message_count,
+  (SELECT max(m.last_seen_at) FROM messages m WHERE m.conversation_slug = c.slug) AS latest_message_at,
+  (SELECT count(*) FROM style_examples se WHERE se.conversation_slug = c.slug) AS style_example_count,
+  (SELECT count(*) FROM memory_chunks mc WHERE mc.conversation_slug = c.slug) AS chunk_count,
+  (SELECT count(*) FROM memory_chunks mc WHERE mc.conversation_slug = c.slug AND mc.embedding_json IS NOT NULL) AS embedded_chunk_count,
+  (SELECT count(*) FROM memory_chunks mc WHERE mc.conversation_slug = c.slug AND mc.summarized_at IS NOT NULL) AS summarized_chunk_count,
+  p.profile_json,
+  p.model AS profile_model,
+  p.source_message_count AS profile_source_message_count,
+  p.source_example_count AS profile_source_example_count,
+  p.updated_at AS profile_updated_at,
+  j.id AS latest_job_id,
+  j.status AS latest_job_status,
+  j.target_message_count AS latest_job_target_message_count,
+  j.observed_message_count AS latest_job_observed_message_count,
+  j.embedding_model AS latest_job_embedding_model,
+  j.profile_model AS latest_job_profile_model,
+  j.error AS latest_job_error,
+  j.started_at AS latest_job_started_at,
+  j.updated_at AS latest_job_updated_at,
+  j.completed_at AS latest_job_completed_at
+FROM conversations c
+LEFT JOIN conversation_profiles p ON p.conversation_slug = c.slug
+LEFT JOIN memory_index_jobs j ON j.id = (
+  SELECT id FROM memory_index_jobs j2
+  WHERE j2.conversation_slug = c.slug
+  ORDER BY j2.updated_at DESC
+  LIMIT 1
+)
+ORDER BY c.updated_at DESC;
+`,
+    { dbPath }
+  );
+  return rows.map((row) => {
+    const profile = parseJsonField(row.profile_json, null);
+    return {
+      slug: row.slug,
+      displayName: row.display_name,
+      relationship: row.relationship || null,
+      sidebarTitle: row.sidebar_title || null,
+      conversationUpdatedAt: row.conversation_updated_at,
+      messageCount: Number(row.message_count || 0),
+      latestMessageAt: row.latest_message_at || null,
+      styleExampleCount: Number(row.style_example_count || 0),
+      chunkCount: Number(row.chunk_count || 0),
+      embeddedChunkCount: Number(row.embedded_chunk_count || 0),
+      summarizedChunkCount: Number(row.summarized_chunk_count || 0),
+      profile: profile
+        ? {
+            confidence: profile.confidence || "low",
+            relationshipSummary: profile.relationshipSummary || "",
+            toneSummary: profile.toneSummary || "",
+            userVoiceRules: profile.userVoiceRules || [],
+            recurringTopics: profile.recurringTopics || [],
+            askUserBefore: profile.askUserBefore || [],
+            doNotImitate: profile.doNotImitate || [],
+          }
+        : null,
+      profileModel: row.profile_model || null,
+      profileSourceMessageCount: Number(row.profile_source_message_count || 0),
+      profileSourceExampleCount: Number(row.profile_source_example_count || 0),
+      profileUpdatedAt: row.profile_updated_at || null,
+      latestJob: row.latest_job_id
+        ? {
+            id: row.latest_job_id,
+            status: row.latest_job_status,
+            targetMessageCount: Number(row.latest_job_target_message_count || 0),
+            observedMessageCount: Number(row.latest_job_observed_message_count || 0),
+            embeddingModel: row.latest_job_embedding_model || null,
+            profileModel: row.latest_job_profile_model || null,
+            error: row.latest_job_error || null,
+            startedAt: row.latest_job_started_at,
+            updatedAt: row.latest_job_updated_at,
+            completedAt: row.latest_job_completed_at || null,
+          }
+        : null,
+    };
+  });
 }
 
 export async function recordDraftMemory({

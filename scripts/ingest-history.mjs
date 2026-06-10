@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { execFile } from "node:child_process";
 import { findSidebarContact, visibleTitleMatchesSidebar } from "../src/contact-utils.mjs";
 import { getContact, loadConfig } from "../src/config.mjs";
 import { refreshConversationProfile } from "../src/memory-profile.mjs";
@@ -30,6 +31,16 @@ function pageFingerprint(visible) {
   });
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function runCommand(command, args) {
+  return new Promise((resolve) => {
+    execFile(command, args, { timeout: 8000 }, (error) => resolve({ ok: !error, error }));
+  });
+}
+
 function cleanMessages(messages) {
   const seen = new Set();
   const unique = [];
@@ -49,9 +60,51 @@ function contactMatchesDescription(config, slug, description) {
   return match?.slug === slug;
 }
 
+function matchingConfiguredVisibleTitle(visible, contact) {
+  const aliases = [
+    contact.displayName,
+    contact.searchName,
+    contact.resultName,
+    contact.conversationTitle,
+    contact.identity?.canonicalName,
+    ...(contact.titleAliases || []),
+    ...(contact.identity?.phoneNumbers || []),
+    ...(contact.identity?.emails || []),
+    ...(contact.identity?.imessageHandles || []),
+  ].filter(Boolean);
+  return aliases.find((title) => visibleTitleMatchesSidebar(visible, { title })) || null;
+}
+
 async function openConfiguredConversation({ config, slug, contact }) {
-  const list = await messagesAx.listConversations();
+  let list = await messagesAx.listConversations({ activate: true });
+  if (!list.ok || !(list.items || []).length) {
+    await runCommand("open", ["-b", "com.apple.MobileSMS"]);
+    await sleep(1500);
+    try {
+      await messagesAx.clearSearch();
+    } catch {
+      // Best effort; the retry below reports whether Messages recovered.
+    }
+    list = await messagesAx.listConversations({ activate: true });
+  }
   if (!list.ok) throw new Error("Could not list Messages conversations.");
+
+  if (!(list.items || []).length) {
+    const visible = await messagesAx.readVisible();
+    const matchedTitle = visible.ok ? matchingConfiguredVisibleTitle(visible, contact) : null;
+    if (visible.ok && matchedTitle) {
+      return {
+        sidebar: {
+          title: matchedTitle,
+          hasUnread: false,
+          preview: "",
+          timeLabel: "",
+        },
+        visible,
+        opened: { ok: true, message: "Using currently visible configured conversation." },
+      };
+    }
+  }
 
   const row = (list.items || []).find((item) => contactMatchesDescription(config, slug, item.description));
   if (row) {

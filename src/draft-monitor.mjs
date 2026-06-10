@@ -6,6 +6,7 @@ import path from "node:path";
 import { fallbackContactForSidebar, findSidebarContact, visibleTitleMatchesSidebar } from "./contact-utils.mjs";
 import { loadConfig } from "./config.mjs";
 import { DEFAULT_MODEL, classifyReplyRisk, draftReply } from "./decision.mjs";
+import { retrieveRelevantMemory } from "./memory-index.mjs";
 import {
   countApprovalRequests,
   createApprovalRequest,
@@ -241,6 +242,32 @@ async function classifyRiskSafely({ visible, contact, memoryContext, draft }) {
       model: DEFAULT_MODEL,
       promptStats: { error: error.message },
       rawText: "",
+    };
+  }
+}
+
+async function attachRelevantMemories({ slug, visible, memoryContext }) {
+  if (process.env.MEMORY_RETRIEVAL_ENABLED === "0") return memoryContext;
+  const query = incomingSinceLastOutgoing(visible)
+    .map((message) => message.text)
+    .filter(Boolean)
+    .join("\n");
+  if (!query.trim()) return memoryContext;
+  try {
+    const relevantMemories = await retrieveRelevantMemory({
+      slug,
+      query,
+      limit: Number(process.env.MEMORY_RETRIEVAL_LIMIT || 6),
+    });
+    return {
+      ...memoryContext,
+      relevantMemories,
+    };
+  } catch (error) {
+    return {
+      ...memoryContext,
+      relevantMemories: [],
+      memoryRetrievalError: error.message,
     };
   }
 }
@@ -552,7 +579,11 @@ async function processSidebarItem({ config, item, since, state, now }) {
 
     await getOllamaVersion();
     await assertOllamaModelAvailable(DEFAULT_MODEL);
-    const memoryContext = await getMemoryContext({ slug, contact });
+    const memoryContext = await attachRelevantMemories({
+      slug,
+      visible: turn.draftVisible,
+      memoryContext: await getMemoryContext({ slug, contact }),
+    });
     const draft = await draftReply({ visible: turn.draftVisible, contact, memoryContext });
     await appendShadowComparison({ since, sidebar, visible, latestHash, turn, draft });
     await recordDraftMemory({ slug, latestHash, draft, action: "shadow-compared", sendResult: null, sidebar });
@@ -573,7 +604,11 @@ async function processSidebarItem({ config, item, since, state, now }) {
 
   await getOllamaVersion();
   await assertOllamaModelAvailable(DEFAULT_MODEL);
-  const memoryContext = await getMemoryContext({ slug, contact });
+  const memoryContext = await attachRelevantMemories({
+    slug,
+    visible,
+    memoryContext: await getMemoryContext({ slug, contact }),
+  });
   const draft = await draftReply({ visible, contact, memoryContext });
   const riskResult = await classifyRiskSafely({ visible, contact, memoryContext, draft });
   let action = "drafted";

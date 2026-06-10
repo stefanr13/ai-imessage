@@ -10,7 +10,10 @@ import { loadConfig } from "./src/config.mjs";
 import {
   createApprovalRequest,
   getApprovalRequest,
+  getConversationMemoryStatus,
   listApprovalRequests,
+  listConversationMemoryStatuses,
+  listMemoryChunks,
   listRecentDrafts,
   markApprovalSent,
   recordApprovalDecision,
@@ -26,6 +29,7 @@ const CODEX_AUTO_RUN = process.env.CODEX_AUTO_RUN === "1";
 const DATA_DIR = path.join(__dirname, "data");
 const EVENTS_FILE = path.join(DATA_DIR, "events.jsonl");
 const HEALTH_FILE = process.env.DRAFT_MONITOR_HEALTH || path.join(DATA_DIR, "draft-monitor-health.json");
+const DASHBOARD_FILE = path.join(__dirname, "public", "dashboard.html");
 
 if (!BRIDGE_TOKEN && !["127.0.0.1", "localhost", "::1"].includes(HOST) && process.env.ALLOW_INSECURE_LAN !== "1") {
   console.error("Refusing to bind approval API on a non-localhost interface without BRIDGE_TOKEN.");
@@ -48,6 +52,15 @@ function jsonResponse(res, statusCode, body) {
 function textResponse(res, statusCode, body) {
   res.writeHead(statusCode, {
     "content-type": "text/plain; charset=utf-8",
+    "cache-control": "no-store",
+  });
+  res.end(body);
+}
+
+async function htmlResponse(res, statusCode, filePath) {
+  const body = await readFile(filePath, "utf8");
+  res.writeHead(statusCode, {
+    "content-type": "text/html; charset=utf-8",
     "cache-control": "no-store",
   });
   res.end(body);
@@ -291,6 +304,47 @@ function parseLimit(url, fallback = 20) {
   return Math.max(1, Math.min(Number.isFinite(limit) ? limit : fallback, 200));
 }
 
+function slugFromMemoryPath(pathname, suffix = null) {
+  const match = pathname.match(/^\/memory\/([^/]+)(?:\/([^/]+))?$/);
+  if (!match) return null;
+  if (suffix && match[2] !== suffix) return null;
+  if (!suffix && match[2]) return null;
+  return decodeURIComponent(match[1]);
+}
+
+function safeLogSlug(slug) {
+  return String(slug || "memory")
+    .replace(/[^a-z0-9_-]+/gi, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64) || "memory";
+}
+
+function startMemoryIndexProcess({ slug, input }) {
+  const args = ["scripts/build-memory-index.mjs", slug];
+  if (input.ingest === true) args.push("--ingest");
+  if (input.force === true) args.push("--force");
+  if (input.skipEmbeddings === true) args.push("--skip-embeddings");
+  if (input.skipSummaries === true) args.push("--skip-summaries");
+  if (input.refreshProfile === false) args.push("--no-refresh");
+  if (Number.isFinite(Number(input.limit))) args.push("--limit", String(Number(input.limit)));
+  if (Number.isFinite(Number(input.maxPages))) args.push("--max-pages", String(Number(input.maxPages)));
+  if (typeof input.embeddingModel === "string" && input.embeddingModel.trim()) {
+    args.push("--embedding-model", input.embeddingModel.trim());
+  }
+
+  const logPath = path.join(DATA_DIR, `memory-index.${safeLogSlug(slug)}.log`);
+  const child = spawn(process.execPath, args, {
+    cwd: __dirname,
+    detached: true,
+    stdio: ["ignore", "pipe", "pipe"],
+    env: process.env,
+  });
+  child.stdout.on("data", (chunk) => appendFile(logPath, chunk).catch(() => {}));
+  child.stderr.on("data", (chunk) => appendFile(logPath, chunk).catch(() => {}));
+  child.unref();
+  return { pid: child.pid, logPath, args };
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     if (req.method === "OPTIONS") {
@@ -299,6 +353,11 @@ const server = http.createServer(async (req, res) => {
     }
 
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+
+    if ((url.pathname === "/" || url.pathname === "/dashboard") && req.method === "GET") {
+      await htmlResponse(res, 200, DASHBOARD_FILE);
+      return;
+    }
 
     if (url.pathname === "/health" && req.method === "GET") {
       const approvalSummary = await summarizeApprovalRequests();
@@ -323,6 +382,52 @@ const server = http.createServer(async (req, res) => {
         monitor,
         approvalSummary,
         recentDrafts,
+      });
+      return;
+    }
+
+    if (url.pathname === "/memory/status" && req.method === "GET") {
+      requireAuthorized(req);
+      jsonResponse(res, 200, {
+        ok: true,
+        conversations: await listConversationMemoryStatuses(),
+      });
+      return;
+    }
+
+    const memorySlug = slugFromMemoryPath(url.pathname);
+    if (memorySlug && req.method === "GET") {
+      requireAuthorized(req);
+      const status = await getConversationMemoryStatus({ slug: memorySlug });
+      if (!status) {
+        jsonResponse(res, 404, { ok: false, error: "Not found" });
+        return;
+      }
+      jsonResponse(res, 200, {
+        ok: true,
+        conversation: status,
+        chunks: await listMemoryChunks({
+          slug: memorySlug,
+          limit: parseLimit(url, 24),
+          includeText: url.searchParams.get("includeText") === "1",
+          includeEmbedding: false,
+        }),
+      });
+      return;
+    }
+
+    const memoryIndexSlug = slugFromMemoryPath(url.pathname, "index");
+    if (memoryIndexSlug && req.method === "POST") {
+      requireAuthorized(req);
+      const input = await readRequestJson(req);
+      const config = await loadConfig();
+      configuredContact(config, memoryIndexSlug);
+      await mkdir(DATA_DIR, { recursive: true });
+      const processInfo = startMemoryIndexProcess({ slug: memoryIndexSlug, input });
+      jsonResponse(res, 202, {
+        ok: true,
+        slug: memoryIndexSlug,
+        process: processInfo,
       });
       return;
     }
