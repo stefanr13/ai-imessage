@@ -244,6 +244,19 @@ Stop it with:
 ./scripts/stop-mobile-bridge-background.sh
 ```
 
+To use the phone app away from the home network, expose only this mobile bridge
+through Cloudflare Tunnel. The tunnel should point to `http://127.0.0.1:8788`;
+the dashboard on `8787` should stay local.
+
+```bash
+./scripts/install-cloudflared.sh
+./scripts/start-cloudflare-tunnel-background.sh
+```
+
+The first run creates `config/cloudflare-tunnel.env`. Add either a Cloudflare
+dashboard tunnel token or a locally managed tunnel name/config, then run the
+start command again. See `docs/cloudflare-tunnel.md`.
+
 Endpoints:
 
 - `GET /mobile/bootstrap`: phone app pairing/config payload.

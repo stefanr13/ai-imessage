@@ -4,5 +4,7 @@ data/
 *.log
 config/contacts.local.json
 config/mobile-bridge.env
+config/cloudflare-tunnel.env
+config/cloudflared/
 launchd/*.plist
 !launchd/*.plist.example
