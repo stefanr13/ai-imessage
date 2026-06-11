@@ -224,8 +224,30 @@ Use a token before binding it to the LAN:
 BRIDGE_TOKEN="$(openssl rand -hex 24)" HOST=0.0.0.0 node server.mjs
 ```
 
+For the phone app, prefer the dedicated token-protected mobile bridge on a
+separate port from the local dashboard:
+
+```bash
+./scripts/start-mobile-bridge-background.sh
+```
+
+It creates `config/mobile-bridge.env` with a local bearer token, starts a
+`messages-mobile-bridge` screen session, and prints the LAN bootstrap URL:
+
+```text
+http://<mac-mini-lan-ip>:8788/mobile/bootstrap
+```
+
+Stop it with:
+
+```bash
+./scripts/stop-mobile-bridge-background.sh
+```
+
 Endpoints:
 
+- `GET /mobile/bootstrap`: phone app pairing/config payload.
+- `GET /mobile/contacts`: configured contacts available for manual send.
 - `GET /health`: monitor heartbeat, approval counts, recent draft metadata.
 - `GET /approvals?status=open`: pending approval/context/UI-state items.
 - `GET /approvals/:id`: full approval request.
@@ -428,6 +450,21 @@ Live sending is blocked unless all are true:
 - The latest-message fingerprint has not changed.
 
 Manual API sends are exact-text only and require a configured contact slug.
+
+## Mobile App Voice Stack
+
+Use Argmax Open-Source SDK / WhisperKit for first-pass on-device iPhone
+dictation. It is a native Swift package for Apple platforms and uses
+Whisper-family Core ML models locally. Start with a base WhisperKit model for
+the "Say this" flow, then benchmark small/distil variants on the actual phone
+before increasing model size.
+
+Keep `whisper.cpp` as the fallback if WhisperKit integration blocks. Avoid
+Picovoice as the default open-source path because its access-key/licensing model
+is not as clean for this local-first app.
+
+See `docs/mobile-app-readiness.md` for the mobile API contract and first app
+scope.
 
 ## Token Controls
 

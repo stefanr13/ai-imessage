@@ -3,5 +3,6 @@ data/
 .env
 *.log
 config/contacts.local.json
+config/mobile-bridge.env
 launchd/*.plist
 !launchd/*.plist.example

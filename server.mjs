@@ -140,6 +140,44 @@ function sendGates(config) {
   return { ok: true, message: null };
 }
 
+function mobileVoiceRecommendation() {
+  return {
+    speechToText: {
+      primary: {
+        library: "Argmax Open-Source SDK / WhisperKit",
+        package: "https://github.com/argmaxinc/argmax-oss-swift",
+        modelFamily: "OpenAI Whisper Core ML models",
+        mode: "on-device",
+        reason:
+          "Native Swift package, MIT/open-source ecosystem, Apple Silicon/Core ML optimized, and a better fit for iPhone dictation than a C++ bridge.",
+      },
+      fallback: {
+        library: "whisper.cpp",
+        package: "https://github.com/ggml-org/whisper.cpp",
+        mode: "on-device",
+        reason:
+          "Mature portable Whisper runtime with Core ML support, useful if WhisperKit integration blocks or we need lower-level control.",
+      },
+      firstAppModel: process.env.MOBILE_STT_MODEL || "openai_whisper-base",
+      privacy: "Voice audio should stay on-device for dictation unless the user explicitly opts into cloud transcription later.",
+    },
+  };
+}
+
+function mobileContactList(config) {
+  return Object.entries(config.contacts || {})
+    .filter(([, contact]) => contact.enabled !== false)
+    .map(([slug, contact]) => ({
+      slug,
+      displayName: contact.displayName || contact.conversationTitle || slug,
+      conversationTitle: contact.conversationTitle || contact.resultName || contact.displayName || slug,
+      autoSend: Boolean(contact.autoSend),
+      manualSendEnabled: true,
+      directSendEnabled: Boolean(contact.directSend?.enabled && contact.directSend?.handle),
+    }))
+    .sort((a, b) => a.displayName.localeCompare(b.displayName));
+}
+
 async function sendExactText({ conversationSlug, text }) {
   const replyText = String(text || "").trim();
   if (!replyText) return { ok: false, message: "approved text is empty" };
@@ -382,6 +420,61 @@ const server = http.createServer(async (req, res) => {
         monitor,
         approvalSummary,
         recentDrafts,
+      });
+      return;
+    }
+
+    if (url.pathname === "/mobile/bootstrap" && req.method === "GET") {
+      requireAuthorized(req);
+      const config = await loadConfig();
+      const monitor = await readJsonFileIfExists(HEALTH_FILE);
+      jsonResponse(res, 200, {
+        ok: true,
+        apiVersion: 1,
+        service: "messages-assistant-mobile-bridge",
+        time: new Date().toISOString(),
+        auth: {
+          type: "bearer",
+          enabled: Boolean(BRIDGE_TOKEN),
+        },
+        network: {
+          host: HOST,
+          port: PORT,
+          lanUrls: HOST === "0.0.0.0" ? getLanAddresses().map((address) => `http://${address}:${PORT}`) : [],
+        },
+        endpoints: {
+          bootstrap: "/mobile/bootstrap",
+          health: "/health",
+          approvals: "/approvals?status=open",
+          approval: "/approvals/{id}",
+          approve: "/approvals/{id}/approve",
+          reject: "/approvals/{id}/reject",
+          context: "/approvals/{id}/context",
+          manualSend: "/send",
+          contacts: "/mobile/contacts",
+        },
+        sendGates: sendGates(config),
+        contacts: mobileContactList(config),
+        monitor: monitor
+          ? {
+              ok: monitor.ok === true,
+              at: monitor.at || null,
+              since: monitor.since || null,
+              pendingApprovalCount: monitor.pendingApprovalCount || 0,
+            }
+          : null,
+        approvalSummary: await summarizeApprovalRequests(),
+        voice: mobileVoiceRecommendation(),
+      });
+      return;
+    }
+
+    if (url.pathname === "/mobile/contacts" && req.method === "GET") {
+      requireAuthorized(req);
+      const config = await loadConfig();
+      jsonResponse(res, 200, {
+        ok: true,
+        contacts: mobileContactList(config),
       });
       return;
     }
