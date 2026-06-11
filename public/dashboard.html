@@ -386,6 +386,28 @@
         return `<ul>${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
       }
 
+      function chunkList(label, items) {
+        if (!items || !items.length) return "";
+        return `
+          <div class="profile-block">
+            <div class="meta">${escapeHtml(label)}</div>
+            ${listItems(items)}
+          </div>`;
+      }
+
+      function chunkSummary(chunk) {
+        const summary = chunk.summary || {};
+        return `
+          <div>${escapeHtml(summary.oneLineSummary || "No summary")}</div>
+          ${chunkList("People and context", summary.peopleAndContext)}
+          ${chunkList("Tone signals", summary.userToneSignals)}
+          ${chunkList("Recurring topics", summary.recurringTopics)}
+          ${chunkList("Ask before", summary.approvalTriggers)}
+          ${chunkList("Do not imitate", summary.doNotImitate)}
+          ${summary.summaryError ? `<div class="meta">Summary warning: ${escapeHtml(summary.summaryError)}</div>` : ""}
+        `;
+      }
+
       function escapeHtml(value) {
         return String(value ?? "")
           .replaceAll("&", "&amp;")
@@ -544,7 +566,7 @@
                         <div class="chunk">
                           <div class="title">Chunk ${chunk.chunkIndex + 1}</div>
                           <div class="meta">${chunk.messageCount} messages | ${fmtDate(chunk.startObservedAt)} to ${fmtDate(chunk.endObservedAt)}</div>
-                          <div>${escapeHtml(chunk.summary?.oneLineSummary || "No summary")}</div>
+                          ${chunkSummary(chunk)}
                         </div>`)
                       .join("")
                   : `<div class="empty">No chunks indexed</div>`
