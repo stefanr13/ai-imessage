@@ -10,6 +10,41 @@ public hostname -> Cloudflare Tunnel -> http://127.0.0.1:8788
 The mobile bridge still requires the bearer token from `config/mobile-bridge.env`
 for every mobile endpoint. Keep that file local and private.
 
+## No-Domain Quick Tunnel
+
+If you do not have a Cloudflare-managed domain yet, use a Quick Tunnel. This
+creates a random `trycloudflare.com` hostname that points to the mobile bridge.
+Cloudflare documents Quick Tunnels as a development option, so treat this as a
+practical bridge while the mobile app is being built, not the final production
+hostname.
+
+Create or edit `config/cloudflare-tunnel.env`:
+
+```bash
+CLOUDFLARE_QUICK_TUNNEL=1
+CLOUDFLARE_QUICK_TUNNEL_SERVICE=http://127.0.0.1:8788
+```
+
+Start it:
+
+```bash
+./scripts/start-cloudflare-tunnel-background.sh
+```
+
+The script writes the generated public URL to:
+
+```text
+data/cloudflare-quick-tunnel-url.txt
+```
+
+The phone app should call:
+
+```text
+https://<random>.trycloudflare.com/mobile/bootstrap
+```
+
+with the bearer token from `config/mobile-bridge.env`.
+
 ## Recommended Path
 
 Use a dashboard-managed Cloudflare Tunnel:

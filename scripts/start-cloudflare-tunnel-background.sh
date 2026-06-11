@@ -34,6 +34,10 @@ if [[ ! -f "$ENV_PATH" ]]; then
   umask 077
   {
     echo "# Store exactly one tunnel mode here."
+    echo "# No-domain quick tunnel mode:"
+    echo "# CLOUDFLARE_QUICK_TUNNEL=1"
+    echo "# CLOUDFLARE_QUICK_TUNNEL_SERVICE=http://127.0.0.1:8788"
+    echo ""
     echo "# Dashboard-managed mode:"
     echo "# CLOUDFLARE_TUNNEL_TOKEN=..."
     echo ""
@@ -43,7 +47,7 @@ if [[ ! -f "$ENV_PATH" ]]; then
   } > "$ENV_PATH"
   chmod 600 "$ENV_PATH"
   echo "created template env=${ENV_PATH}" >&2
-  echo "add CLOUDFLARE_TUNNEL_TOKEN from Cloudflare Zero Trust, or configure a named tunnel" >&2
+  echo "enable CLOUDFLARE_QUICK_TUNNEL=1, add CLOUDFLARE_TUNNEL_TOKEN, or configure a named tunnel" >&2
   exit 1
 fi
 
@@ -54,7 +58,10 @@ set -a
 source "$ENV_PATH"
 set +a
 
-if [[ -n "${CLOUDFLARE_TUNNEL_TOKEN:-}" ]]; then
+if [[ "${CLOUDFLARE_QUICK_TUNNEL:-0}" == "1" ]]; then
+  QUICK_SERVICE="${CLOUDFLARE_QUICK_TUNNEL_SERVICE:-http://127.0.0.1:8788}"
+  RUN_COMMAND="exec '$CLOUDFLARED_BIN' tunnel --no-autoupdate --url '$QUICK_SERVICE'"
+elif [[ -n "${CLOUDFLARE_TUNNEL_TOKEN:-}" ]]; then
   RUN_COMMAND="exec '$CLOUDFLARED_BIN' tunnel --no-autoupdate run --token \"\$CLOUDFLARE_TUNNEL_TOKEN\""
 elif [[ -n "${CLOUDFLARE_TUNNEL_NAME:-}" ]]; then
   CONFIG_ARG=""
@@ -67,7 +74,7 @@ elif [[ -n "${CLOUDFLARE_TUNNEL_NAME:-}" ]]; then
   fi
   RUN_COMMAND="exec '$CLOUDFLARED_BIN' tunnel ${CONFIG_ARG} --no-autoupdate run \"\$CLOUDFLARE_TUNNEL_NAME\""
 else
-  echo "set CLOUDFLARE_TUNNEL_TOKEN or CLOUDFLARE_TUNNEL_NAME in ${ENV_PATH}" >&2
+  echo "set CLOUDFLARE_QUICK_TUNNEL=1, CLOUDFLARE_TUNNEL_TOKEN, or CLOUDFLARE_TUNNEL_NAME in ${ENV_PATH}" >&2
   exit 1
 fi
 
@@ -94,6 +101,20 @@ if [[ "$STARTED" != "1" ]]; then
   echo "Cloudflare tunnel did not stay running" >&2
   tail -n 120 "$LOG_PATH" >&2 || true
   exit 1
+fi
+
+if [[ "${CLOUDFLARE_QUICK_TUNNEL:-0}" == "1" ]]; then
+  URL_FILE="${CLOUDFLARE_QUICK_TUNNEL_URL_FILE:-$PWD/data/cloudflare-quick-tunnel-url.txt}"
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    URL="$(grep -Eo 'https://[-a-z0-9]+[.]trycloudflare[.]com' "$LOG_PATH" | tail -n 1 || true)"
+    if [[ -n "$URL" ]]; then
+      printf "%s\n" "$URL" > "$URL_FILE"
+      echo "url=${URL}"
+      echo "url_file=${URL_FILE}"
+      break
+    fi
+    sleep 1
+  done
 fi
 
 echo "started session=${SESSION_NAME}"
