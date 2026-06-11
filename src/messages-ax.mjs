@@ -58,13 +58,22 @@ function runAppleScript(script) {
 export const messagesAx = {
   permission: (prompt = false) => runHelper(prompt ? ["permission", "--prompt"] : ["permission"]),
   open: (name, resultName = name) => runHelper(["open", name, "--result", resultName]),
-  openSidebar: (description, { background = false } = {}) =>
-    runHelper(background ? ["open-sidebar", "--background", description] : ["open-sidebar", description]),
-  readVisible: () => runHelper(["read-visible"]),
+  openSidebar: (description, { background = false, noClear = false } = {}) =>
+    runHelper([
+      "open-sidebar",
+      ...(background ? ["--background"] : []),
+      ...(noClear ? ["--no-clear"] : []),
+      description,
+    ]),
+  readVisible: ({ activate = false, main = false } = {}) =>
+    runHelper(["read-visible", ...(activate ? ["--activate"] : []), ...(main ? ["--main"] : [])]),
   identity: () => runHelper(["identity"]),
   listConversations: ({ activate = false } = {}) =>
     runHelper(activate ? ["list-conversations", "--activate"] : ["list-conversations"]),
   clearSearch: () => runHelper(["clear-search"]),
+  clickPoint: ({ x, y }) => runHelper(["click-point", String(x), String(y)]),
+  scrollSidebar: (direction, { pages = 1 } = {}) =>
+    runHelper(["scroll-sidebar", direction, "--pages", String(pages)]),
   scrollTranscript: (direction, { pages = 1, background = false } = {}) =>
     runHelper([
       "scroll-transcript",

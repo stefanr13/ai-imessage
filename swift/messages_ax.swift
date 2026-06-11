@@ -190,6 +190,27 @@ func focusedWindow(_ app: AXUIElement) -> AXUIElement? {
     return nil
 }
 
+func sidebarRowCount(_ window: AXUIElement) -> Int {
+    let windowFrame = attrRect(window, "AXFrame")
+    var count = 0
+    walk(window, maxDepth: 14) { element, _ in
+        guard attrString(element, kAXRoleAttribute) == kAXStaticTextRole,
+              let desc = attrString(element, kAXDescriptionAttribute),
+              desc.contains(","),
+              let frame = attrRect(element, "AXFrame") else {
+            return
+        }
+        if let windowFrame, frame.minX >= windowFrame.minX + 340 { return }
+        count += 1
+    }
+    return count
+}
+
+func sidebarWindow(_ app: AXUIElement) -> AXUIElement? {
+    guard let windows = attr(app, kAXWindowsAttribute) as? [AXUIElement] else { return nil }
+    return windows.max { sidebarRowCount($0) < sidebarRowCount($1) }.flatMap { sidebarRowCount($0) > 0 ? $0 : nil }
+}
+
 func buildTree(_ element: AXUIElement, path: String = "0", depth: Int = 0, maxDepth: Int = 8, maxChildren: Int = 80) -> AXNode {
     var node = AXNode(
         path: path,
@@ -316,7 +337,8 @@ func clearSearch(activate: Bool = true) -> BasicResult {
     guard isTrusted() else {
         return BasicResult(ok: false, trusted: false, message: "Accessibility permission is not granted.")
     }
-    guard let (_, app) = appElement(launchIfNeeded: activate, activate: activate), let window = focusedWindow(app) else {
+    guard let (_, app) = appElement(launchIfNeeded: activate, activate: activate),
+          let window = sidebarWindow(app) ?? focusedWindow(app) else {
         return BasicResult(ok: false, trusted: true, message: "Messages is unavailable.")
     }
     guard let search = findSearchField(window) else {
@@ -546,7 +568,8 @@ func listVisibleConversations(activate: Bool = false) -> ConversationListResult 
     }
 
     _ = clearSearch(activate: activate)
-    guard let (_, refreshedApp) = appElement(launchIfNeeded: activate, activate: activate), let refreshedWindow = focusedWindow(refreshedApp) else {
+    guard let (_, refreshedApp) = appElement(launchIfNeeded: activate, activate: activate),
+          let refreshedWindow = sidebarWindow(refreshedApp) ?? focusedWindow(refreshedApp) else {
         return ConversationListResult(ok: false, trusted: true, items: [])
     }
 
@@ -576,6 +599,43 @@ func listVisibleConversations(activate: Bool = false) -> ConversationListResult 
     }
 
     return ConversationListResult(ok: true, trusted: true, items: items)
+}
+
+func scrollSidebar(direction: String, pages: Int = 1, activate: Bool = true) -> BasicResult {
+    guard isTrusted() else {
+        return BasicResult(ok: false, trusted: false, message: "Accessibility permission is not granted.")
+    }
+    guard let (_, app) = appElement(launchIfNeeded: activate, activate: activate),
+          let window = sidebarWindow(app) ?? focusedWindow(app) else {
+        return BasicResult(ok: false, trusted: true, message: "Messages is unavailable.")
+    }
+
+    let windowFrame = attrRect(window, "AXFrame")
+    var sidebarFrames: [CGRect] = []
+    walk(window, maxDepth: 14) { element, _ in
+        guard attrString(element, kAXRoleAttribute) == kAXStaticTextRole,
+              let desc = attrString(element, kAXDescriptionAttribute),
+              desc.contains(","),
+              let frame = attrRect(element, "AXFrame") else {
+            return
+        }
+        if let windowFrame, frame.minX >= windowFrame.minX + 320 { return }
+        sidebarFrames.append(frame)
+    }
+
+    guard let first = sidebarFrames.first else {
+        return BasicResult(ok: false, trusted: true, message: "Sidebar conversation rows not found.")
+    }
+    let combined = sidebarFrames.dropFirst().reduce(first) { partial, frame in
+        partial.union(frame)
+    }
+    let point = CGPoint(x: combined.midX, y: combined.midY)
+    let delta: Int32 = direction == "older" || direction == "down" ? -7 : 7
+    for _ in 0..<max(1, pages) {
+        scrollWheel(at: point, delta: delta)
+        usleep(250_000)
+    }
+    return BasicResult(ok: true, trusted: true, message: "Scrolled sidebar \(direction).")
 }
 
 func findSidebarConversationText(_ root: AXUIElement, description: String) -> AXUIElement? {
@@ -621,7 +681,7 @@ func activateSidebarTarget(_ target: SidebarOpenTarget, foreground: Bool) -> Boo
     return true
 }
 
-func openSidebarConversation(description: String, activate: Bool = true) -> BasicResult {
+func openSidebarConversation(description: String, activate: Bool = true, clearFirst: Bool = true) -> BasicResult {
     guard isTrusted() else {
         return BasicResult(ok: false, trusted: false, message: "Accessibility permission is not granted.")
     }
@@ -629,8 +689,11 @@ func openSidebarConversation(description: String, activate: Bool = true) -> Basi
         return BasicResult(ok: false, trusted: true, message: "Messages is unavailable.")
     }
 
-    _ = clearSearch(activate: activate)
-    guard let (_, refreshedApp) = appElement(launchIfNeeded: activate, activate: activate), let refreshedWindow = focusedWindow(refreshedApp) else {
+    if clearFirst {
+        _ = clearSearch(activate: activate)
+    }
+    guard let (_, refreshedApp) = appElement(launchIfNeeded: activate, activate: activate),
+          let refreshedWindow = sidebarWindow(refreshedApp) ?? focusedWindow(refreshedApp) else {
         return BasicResult(ok: false, trusted: true, message: "Messages disappeared after clearing search.")
     }
     guard let target = findSidebarConversationTarget(refreshedWindow, description: description) else {
@@ -798,11 +861,15 @@ func visibleMessages(_ root: AXUIElement) -> [VisibleMessage] {
     return unique
 }
 
-func readVisible(activate: Bool = false) -> ReadVisibleResult {
+func readVisible(activate: Bool = false, preferSidebarWindow: Bool = false) -> ReadVisibleResult {
     guard isTrusted() else {
         return ReadVisibleResult(ok: false, trusted: false, conversationTitle: nil, messages: [])
     }
-    guard let (_, app) = appElement(launchIfNeeded: activate, activate: activate), let window = focusedWindow(app) else {
+    guard let (_, app) = appElement(launchIfNeeded: activate, activate: activate) else {
+        return ReadVisibleResult(ok: false, trusted: true, conversationTitle: nil, messages: [])
+    }
+    let window = preferSidebarWindow ? (sidebarWindow(app) ?? focusedWindow(app)) : focusedWindow(app)
+    guard let window else {
         return ReadVisibleResult(ok: false, trusted: true, conversationTitle: nil, messages: [])
     }
     return ReadVisibleResult(
@@ -852,7 +919,7 @@ func scrollTranscript(direction: String, pages: Int = 1, activate: Bool = true) 
 
 let args = CommandLine.arguments.dropFirst()
 guard let command = args.first else {
-    fputs("Usage: messages-ax <permission|snapshot|read-visible|identity|list-conversations|clear-search|open-sidebar|scroll-transcript|open|send> [...]\n", stderr)
+    fputs("Usage: messages-ax <permission|snapshot|read-visible|identity|list-conversations|clear-search|open-sidebar|click-point|scroll-sidebar|scroll-transcript|open|send> [...]\n", stderr)
     exit(2)
 }
 
@@ -873,7 +940,8 @@ case "snapshot":
     printJSON(buildTree(window))
 case "read-visible":
     let activate = args.dropFirst().contains("--activate")
-    printJSON(readVisible(activate: activate))
+    let main = args.dropFirst().contains("--main")
+    printJSON(readVisible(activate: activate, preferSidebarWindow: main))
 case "identity":
     printJSON(revealConversationIdentity())
 case "list-conversations":
@@ -897,15 +965,38 @@ case "open":
 case "open-sidebar":
     let rest = Array(args.dropFirst())
     let background = rest.contains("--background")
+    let noClear = rest.contains("--no-clear")
     let description = rest
-        .filter { $0 != "--background" }
+        .filter { $0 != "--background" && $0 != "--no-clear" }
         .joined(separator: " ")
         .trimmingCharacters(in: .whitespacesAndNewlines)
     guard !description.isEmpty else {
         fputs("Usage: messages-ax open-sidebar [--background] <exact-sidebar-description>\n", stderr)
         exit(2)
     }
-    printJSON(openSidebarConversation(description: description, activate: !background))
+    printJSON(openSidebarConversation(description: description, activate: !background, clearFirst: !noClear))
+case "scroll-sidebar":
+    let rest = Array(args.dropFirst())
+    guard let direction = rest.first else {
+        fputs("Usage: messages-ax scroll-sidebar <older|newer> [--pages N]\n", stderr)
+        exit(2)
+    }
+    var pages = 1
+    if let pagesIndex = rest.firstIndex(of: "--pages"), pagesIndex + 1 < rest.count {
+        pages = Int(rest[pagesIndex + 1]) ?? 1
+    }
+    printJSON(scrollSidebar(direction: direction, pages: pages))
+case "click-point":
+    let rest = Array(args.dropFirst())
+    guard rest.count >= 2,
+          let x = Double(rest[0]),
+          let y = Double(rest[1]) else {
+        fputs("Usage: messages-ax click-point <x> <y>\n", stderr)
+        exit(2)
+    }
+    clickPoint(CGPoint(x: x, y: y))
+    usleep(700_000)
+    printJSON(BasicResult(ok: true, trusted: true, message: "Clicked point."))
 case "scroll-transcript":
     let rest = Array(args.dropFirst())
     let background = rest.contains("--background")
